@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,7 @@ struct HeaderList {
 
 struct HeaderCallbackState {
   std::vector<std::pair<std::string, std::string>> *headers;
+  int *status;
   bool failed = false;
 };
 
@@ -51,6 +53,18 @@ size_t append_header(char *data, size_t size, size_t count, void *target) {
   const size_t bytes = size * count;
   try {
     std::string line(data, bytes);
+    if (line.rfind("HTTP/", 0) == 0) {
+      const auto separator = line.find(' ');
+      if (separator != std::string::npos) {
+        int status = 0;
+        const char *first = line.data() + separator + 1;
+        const char *last = line.data() + line.size();
+        const auto [end, error] = std::from_chars(first, last, status);
+        if (error == std::errc{} && end != first)
+          *state.status = status;
+      }
+      return bytes;
+    }
     const auto colon = line.find(':');
     if (colon != std::string::npos) {
       std::string name = line.substr(0, colon);
@@ -104,10 +118,13 @@ std::string HttpResponse::header(const std::string &name) const {
   return {};
 }
 
-HttpResponse CurlTransport::post(
-    const std::string &url, const std::string &body,
-    const std::vector<std::pair<std::string, std::string>> &headers,
-    int timeout_sec, std::size_t max_response_bytes) {
+namespace {
+
+HttpResponse
+perform_post(const std::string &url, const std::string &body,
+             const std::vector<std::pair<std::string, std::string>> &headers,
+             int timeout_sec, std::size_t max_response_bytes,
+             const StreamChunkHandler *on_chunk) {
   HttpResponse response;
   const CURLcode global_code = initialize_curl();
   if (global_code != CURLE_OK) {
@@ -137,7 +154,14 @@ HttpResponse CurlTransport::post(
 
   detail::BodyCallbackState body_state;
   body_state.max_bytes = max_response_bytes;
-  HeaderCallbackState header_state{&response.headers};
+  body_state.append = [&response, on_chunk](std::string &target,
+                                            std::string_view chunk) {
+    if (on_chunk && response.status >= 200 && response.status < 300)
+      (*on_chunk)(chunk);
+    else
+      target.append(chunk.data(), chunk.size());
+  };
+  HeaderCallbackState header_state{&response.headers, &response.status};
   char error_buffer[CURL_ERROR_SIZE] = {};
   auto set_option = [&response, handle = handle.value](
                         CURLoption option, const char *name, auto value) {
@@ -167,7 +191,7 @@ HttpResponse CurlTransport::post(
 
   const CURLcode code = curl_easy_perform(handle.value);
   response.body = std::move(body_state.body);
-  response.response_bytes_received = response.body.size();
+  response.response_bytes_received = body_state.received_bytes;
   response.response_too_large = body_state.too_large;
   response.response_callback_failed =
       body_state.callback_failed || header_state.failed;
@@ -198,6 +222,25 @@ HttpResponse CurlTransport::post(
                                      : status_code > max_status ? max_status
                                                                 : status_code);
   return response;
+}
+
+} // namespace
+
+HttpResponse CurlTransport::post(
+    const std::string &url, const std::string &body,
+    const std::vector<std::pair<std::string, std::string>> &headers,
+    int timeout_sec, std::size_t max_response_bytes) {
+  return perform_post(url, body, headers, timeout_sec, max_response_bytes,
+                      nullptr);
+}
+
+HttpResponse CurlTransport::post_stream(
+    const std::string &url, const std::string &body,
+    const std::vector<std::pair<std::string, std::string>> &headers,
+    int timeout_sec, std::size_t max_response_bytes,
+    const StreamChunkHandler &on_chunk) {
+  return perform_post(url, body, headers, timeout_sec, max_response_bytes,
+                      &on_chunk);
 }
 
 } // namespace xoi

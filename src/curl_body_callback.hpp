@@ -11,6 +11,7 @@ namespace xoi::detail {
 struct BodyCallbackState {
   std::string body;
   std::size_t max_bytes = 0;
+  std::size_t received_bytes = 0;
   bool too_large = false;
   bool callback_failed = false;
   std::function<void(std::string &, std::string_view)> append =
@@ -28,12 +29,13 @@ inline std::size_t append_body(char *data, std::size_t size, std::size_t count,
   }
   const std::size_t bytes = size * count;
   if (bytes >
-      state.max_bytes - (std::min)(state.body.size(), state.max_bytes)) {
+      state.max_bytes - (std::min)(state.received_bytes, state.max_bytes)) {
     state.too_large = true;
     return 0;
   }
   try {
     state.append(state.body, std::string_view(data, bytes));
+    state.received_bytes += bytes;
     return bytes;
   } catch (...) {
     state.callback_failed = true;

@@ -5,8 +5,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <variant>
 
 namespace xoi {
@@ -19,6 +21,7 @@ enum class ErrorKind : std::uint8_t {
   Protocol,
   Limit,
   ResponseTooLarge,
+  Callback,
 };
 
 /// Describes an SDK or provider error without throwing for request failures.
@@ -87,8 +90,17 @@ public:
                   std::unique_ptr<Transport> transport = nullptr);
   /// Sends a request and returns a response or a typed error.
   Result<Response> send(const Request &request) const;
+  /// Sends a streaming request, reporting each text delta as it arrives.
+  /// The string view is valid only during the callback. Tool calls are
+  /// returned in the completed response.
+  Result<Response>
+  send_stream(const Request &request,
+              const std::function<void(std::string_view)> &on_text_delta) const;
 
 private:
+  Result<Response>
+  send_impl(const Request &request,
+            const std::function<void(std::string_view)> *on_text_delta) const;
   Config config_;
   std::unique_ptr<Transport> transport_;
 };

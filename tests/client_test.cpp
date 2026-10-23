@@ -39,6 +39,38 @@ public:
     return response;
   }
 
+  xoi::HttpResponse
+  post_stream(const std::string &url, const std::string &body,
+              const std::vector<std::pair<std::string, std::string>> &headers,
+              int timeout_sec, std::size_t max_response_bytes,
+              const xoi::StreamChunkHandler &on_chunk) override {
+    auto response = post(url, body, headers, timeout_sec, max_response_bytes);
+    if (response.transport_error.empty() && response.status >= 200 &&
+        response.status < 300 && !response.response_too_large &&
+        !response.response_callback_failed) {
+      try {
+        constexpr std::size_t chunk_size = 7;
+        for (std::size_t offset = 0; offset < response.body.size();
+             offset += chunk_size) {
+          const auto size =
+              (std::min)(chunk_size, response.body.size() - offset);
+          on_chunk(std::string_view(response.body.data() + offset, size));
+        }
+        response.response_bytes_received = response.body.size();
+      } catch (const std::exception &error) {
+        response.response_callback_failed = true;
+        response.transport_failure = xoi::TransportFailure::Callback;
+        response.transport_error =
+            std::string("stream callback failed: ") + error.what();
+      } catch (...) {
+        response.response_callback_failed = true;
+        response.transport_failure = xoi::TransportFailure::Callback;
+        response.transport_error = "stream callback failed";
+      }
+    }
+    return response;
+  }
+
   size_t calls() const {
     return urls.size();
   }
@@ -117,6 +149,7 @@ TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {
   EXPECT_EQ(sent["system"], "Be concise.");
   EXPECT_EQ(sent["messages"][0]["content"][0]["text"], "Hello");
   EXPECT_EQ(sent["tools"][0]["input_schema"]["required"][0], "path");
+  EXPECT_FALSE(sent.contains("stream"));
   EXPECT_EQ(observed->timeouts[0], 60);
 
   const auto &headers = observed->request_headers[0];
@@ -321,6 +354,218 @@ TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   EXPECT_EQ(observed->request_headers[0].back().second, "Bearer test-key");
 }
 
+TEST(ClientTest, StreamsAnthropicTextAcrossTransportChunkBoundaries) {
+  const std::string events =
+      "event: message_start\r\n"
+      "data: "
+      "{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}\r\n\r\n"
+      "event: content_block_start\r\n"
+      "data: "
+      "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{"
+      "\"type\":\"text\",\"text\":\"\"}}\r\n\r\n"
+      "event: content_block_delta\r\n"
+      "data: "
+      "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":"
+      "\"text_delta\",\"text\":\"Hello\"}}\r\n\r\n"
+      "event: content_block_delta\r\n"
+      "data: "
+      "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":"
+      "\"text_delta\",\"text\":\" world\"}}\r\n\r\n"
+      "event: message_delta\r\n"
+      "data: "
+      "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}"
+      "\r\n\r\n"
+      "event: message_stop\r\n"
+      "data: {\"type\":\"message_stop\"}\r\n\r\n";
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, events, {}, {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  std::string streamed_text;
+
+  const auto result = client.send_stream(
+      test_request(),
+      [&streamed_text](std::string_view text) { streamed_text.append(text); });
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(streamed_text, "Hello world");
+  ASSERT_EQ(result.value().content.size(), 1U);
+  EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text, "Hello world");
+  EXPECT_EQ(result.value().stop_reason, "end_turn");
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_TRUE(sent["stream"].get<bool>());
+  EXPECT_NE(std::find(observed->request_headers[0].begin(),
+                      observed->request_headers[0].end(),
+                      std::make_pair(std::string("Accept"),
+                                     std::string("text/event-stream"))),
+            observed->request_headers[0].end());
+  EXPECT_EQ(observed->urls[0], "https://anthropic.test/v1/messages");
+}
+
+TEST(ClientTest, StreamsAnthropicToolCalls) {
+  const std::string events =
+      "event: content_block_start\n"
+      "data: "
+      "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{"
+      "\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_file\","
+      "\"input\":{}}}\n\n"
+      "event: content_block_delta\n"
+      "data: "
+      "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":"
+      "\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n"
+      "event: content_block_delta\n"
+      "data: "
+      "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":"
+      "\"input_json_delta\",\"partial_json\":\"\\\"README.md\\\"}\"}}\n\n"
+      "event: message_delta\n"
+      "data: "
+      "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}"
+      "\n\n";
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, events, {}, {}}});
+  xoi::Client client(test_config(), std::move(mock));
+  std::string streamed_text;
+
+  const auto result = client.send_stream(
+      test_request(),
+      [&streamed_text](std::string_view text) { streamed_text.append(text); });
+
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(streamed_text.empty());
+  ASSERT_EQ(result.value().content.size(), 1U);
+  const auto &tool = std::get<xoi::ToolUse>(result.value().content[0]);
+  EXPECT_EQ(tool.id, "tool-1");
+  EXPECT_EQ(tool.name, "read_file");
+  EXPECT_EQ(tool.input["path"], "README.md");
+  EXPECT_EQ(result.value().stop_reason, "tool_use");
+}
+
+TEST(ClientTest, StreamsOpenAITextAndAssemblesToolCalls) {
+  const std::string events =
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Reading "
+      "\"}}]}\n\n"
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"file\"}}]}\n\n"
+      "data: "
+      "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,"
+      "\"id\":\"call-1\",\"function\":{\"name\":\"read_\",\"arguments\":\"{"
+      "\\\"path\\\":\"}}]}}]}\n\n"
+      "data: "
+      "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,"
+      "\"function\":{\"name\":\"file\",\"arguments\":\"\\\"README.md\\\"}\"}}]}"
+      "}]}\n\n"
+      "data: "
+      "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_"
+      "calls\"}]}\n\n"
+      "data: [DONE]\n\n";
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, events, {}, {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+  std::string streamed_text;
+
+  const auto result = client.send_stream(
+      test_request(),
+      [&streamed_text](std::string_view text) { streamed_text.append(text); });
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(streamed_text, "Reading file");
+  ASSERT_EQ(result.value().content.size(), 2U);
+  EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text,
+            "Reading file");
+  const auto &tool = std::get<xoi::ToolUse>(result.value().content[1]);
+  EXPECT_EQ(tool.id, "call-1");
+  EXPECT_EQ(tool.name, "read_file");
+  EXPECT_EQ(tool.input["path"], "README.md");
+  EXPECT_EQ(result.value().stop_reason, "tool_calls");
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_TRUE(sent["stream"].get<bool>());
+  EXPECT_EQ(observed->urls[0], "https://openai.test/v1/chat/completions");
+}
+
+TEST(ClientTest, ReportsStreamingCallbackExceptions) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result = client.send_stream(test_request(), [](std::string_view) {
+    throw std::runtime_error("consumer stopped");
+  });
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Callback);
+  EXPECT_NE(result.error().message.find("consumer stopped"), std::string::npos);
+}
+
+TEST(ClientTest, ReportsMalformedStreamingEvents) {
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, "data: {invalid}\n\n", {}, {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_NE(result.error().message.find("invalid streaming event"),
+            std::string::npos);
+}
+
+TEST(ClientTest, RejectsInvalidStreamingEventShape) {
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200,
+                                      "data: "
+                                      "{\"choices\":\"not-an-array\"}\n\n",
+                                      {},
+                                      {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_EQ(result.error().message, "streaming event choices must be an array");
+}
+
+TEST(ClientTest, ReportsProviderStreamingErrors) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       "data: "
+       "{\"error\":{\"message\":\"overloaded\"}}\n\n",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_NE(result.error().message.find("overloaded"), std::string::npos);
+}
+
+TEST(ClientTest, RejectsEmptyStreamingResponse) {
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, {}, {}, {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_EQ(result.error().message, "stream response contained no events");
+}
+
 TEST(ClientTest, EnumJsonSerializationPreservesUnderlyingValues) {
   EXPECT_EQ(nlohmann::json(xoi::Provider::Anthropic), 0);
   EXPECT_EQ(nlohmann::json(xoi::Provider::OpenAICompatible), 1);
@@ -409,6 +654,17 @@ TEST(CurlBodyCallbackTest, StopsBeforeAppendingBytesAboveLimit) {
   EXPECT_TRUE(state.too_large);
   EXPECT_FALSE(state.callback_failed);
   EXPECT_TRUE(state.body.empty());
+}
+
+TEST(CurlBodyCallbackTest, CountsBytesForwardedWithoutBuffering) {
+  xoi::detail::BodyCallbackState state;
+  state.max_bytes = 16;
+  state.append = [](std::string &, std::string_view) {};
+  char chunk[] = "stream";
+
+  EXPECT_EQ(xoi::detail::append_body(chunk, 1, 6, &state), 6U);
+  EXPECT_TRUE(state.body.empty());
+  EXPECT_EQ(state.received_bytes, 6U);
 }
 
 TEST(CurlOptionTest, ReportsInvalidOptionInsteadOfIgnoringIt) {
