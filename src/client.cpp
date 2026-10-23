@@ -320,7 +320,12 @@ Result<Response> Client::send(const Request &request) const {
     }
     const bool transient_http =
         http.status == 429 || (http.status >= 500 && http.status <= 599);
-    const bool transient_transport = !http.transport_error.empty();
+    const bool retryable_transport_failure =
+        http.transport_failure == TransportFailure::Connection ||
+        http.transport_failure == TransportFailure::Timeout;
+    const bool transient_transport =
+        !http.transport_error.empty() && retryable_transport_failure &&
+        http.response_bytes_received == 0 && http.body.empty();
     if ((transient_http || transient_transport) &&
         attempt < config_.max_retries) {
       const int64_t max_wait_ms =

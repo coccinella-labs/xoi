@@ -29,6 +29,7 @@ struct HttpResponse {
   bool response_too_large = false;
   bool response_callback_failed = false;
   TransportFailure transport_failure = TransportFailure::None;
+  std::size_t response_bytes_received = 0;
 
   /// Returns a response header value using case-insensitive name matching.
   std::string header(const std::string &name) const;

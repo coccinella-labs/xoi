@@ -70,6 +70,19 @@ size_t append_header(char *data, size_t size, size_t count, void *target) {
   }
 }
 
+TransportFailure transport_failure_for(CURLcode code) {
+  switch (code) {
+  case CURLE_COULDNT_RESOLVE_PROXY:
+  case CURLE_COULDNT_RESOLVE_HOST:
+  case CURLE_COULDNT_CONNECT:
+    return TransportFailure::Connection;
+  case CURLE_OPERATION_TIMEDOUT:
+    return TransportFailure::Timeout;
+  default:
+    return TransportFailure::Other;
+  }
+}
+
 } // namespace
 
 std::string HttpResponse::header(const std::string &name) const {
@@ -154,6 +167,7 @@ HttpResponse CurlTransport::post(
 
   const CURLcode code = curl_easy_perform(handle.value);
   response.body = std::move(body_state.body);
+  response.response_bytes_received = response.body.size();
   response.response_too_large = body_state.too_large;
   response.response_callback_failed =
       body_state.callback_failed || header_state.failed;
@@ -166,7 +180,7 @@ HttpResponse CurlTransport::post(
       response.transport_error =
           error_buffer[0] ? error_buffer : curl_easy_strerror(code);
     if (response.transport_failure == TransportFailure::None)
-      response.transport_failure = TransportFailure::Other;
+      response.transport_failure = transport_failure_for(code);
     return response;
   }
   long status_code = 0;

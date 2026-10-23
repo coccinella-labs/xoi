@@ -174,6 +174,103 @@ TEST(ClientTest, RetriesServerErrors) {
   EXPECT_EQ(observed->calls(), 2U);
 }
 
+TEST(ClientTest, RetriesConnectionFailureBeforeResponseBytes) {
+  xoi::HttpResponse connection_failure;
+  connection_failure.transport_error = "connection refused";
+  connection_failure.transport_failure = xoi::TransportFailure::Connection;
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      std::move(connection_failure),
+      {200, R"({"content":[{"type":"text","text":"recovered"}]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(observed->calls(), 2U);
+}
+
+TEST(ClientTest, RetriesTimeoutBeforeResponseBytes) {
+  xoi::HttpResponse timeout;
+  timeout.transport_error = "operation timed out";
+  timeout.transport_failure = xoi::TransportFailure::Timeout;
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      std::move(timeout),
+      {200, R"({"content":[{"type":"text","text":"recovered"}]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(observed->calls(), 2U);
+}
+
+TEST(ClientTest, DoesNotRetryConnectionFailureAfterResponseBytes) {
+  xoi::HttpResponse partial;
+  partial.body = "partial";
+  partial.response_bytes_received = partial.body.size();
+  partial.transport_error = "connection lost";
+  partial.transport_failure = xoi::TransportFailure::Connection;
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      std::move(partial), {200, R"({"content":[]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Transport);
+  EXPECT_FALSE(result.error().retryable);
+  EXPECT_EQ(observed->calls(), 1U);
+}
+
+TEST(ClientTest, DoesNotRetryTimeoutAfterResponseBytes) {
+  xoi::HttpResponse partial;
+  partial.body = "partial";
+  partial.response_bytes_received = partial.body.size();
+  partial.transport_error = "operation timed out";
+  partial.transport_failure = xoi::TransportFailure::Timeout;
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      std::move(partial), {200, R"({"content":[]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Transport);
+  EXPECT_FALSE(result.error().retryable);
+  EXPECT_EQ(observed->calls(), 1U);
+}
+
+TEST(ClientTest, DoesNotRetryOtherTransportFailures) {
+  xoi::HttpResponse failure;
+  failure.transport_error = "protocol error";
+  failure.transport_failure = xoi::TransportFailure::Other;
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      std::move(failure), {200, R"({"content":[]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Transport);
+  EXPECT_FALSE(result.error().retryable);
+  EXPECT_EQ(observed->calls(), 1U);
+}
+
 TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
