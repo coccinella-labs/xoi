@@ -225,6 +225,34 @@ TEST(ClientTest, ReportsMalformedResponseAsProtocolError) {
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
 }
 
+TEST(ClientTest, RejectsResponseBodyAboveConfiguredLimit) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200, R"({"content":[{"type":"text","text":"large"}]})", {}, {}}});
+  auto config = test_config();
+  config.max_response_bytes = 12;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::ResponseTooLarge);
+  EXPECT_FALSE(result.error().retryable);
+}
+
+TEST(ClientTest, RejectsZeroResponseBodyLimit) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_response_bytes = 0;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Configuration);
+  EXPECT_EQ(observed->calls(), 0U);
+}
+
 TEST(ClientTest, ConvertsToolResultsForOpenAICompatibleRequests) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200, R"({"choices":[{"message":{"content":"done"}}]})", {}, {}}});

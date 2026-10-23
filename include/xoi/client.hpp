@@ -3,6 +3,7 @@
 #include <xoi/transport.hpp>
 #include <xoi/types.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@ enum class ErrorKind : std::uint8_t {
   Http,
   Protocol,
   Limit,
+  ResponseTooLarge,
 };
 
 /// Describes an SDK or provider error without throwing for request failures.
@@ -66,6 +68,7 @@ struct Config {
   std::string api_key;
   std::string base_url;
   int timeout_sec = 60;
+  std::size_t max_response_bytes = 8U * 1024U * 1024U;
   int max_retries = 3;
   int initial_backoff_ms = 250;
   int max_backoff_sec = 8;

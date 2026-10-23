@@ -268,7 +268,7 @@ Result<Response> Client::send(const Request &request) const {
     return Error{ErrorKind::Configuration, "base URL is empty", 0, false};
   if (config_.timeout_sec <= 0 || config_.max_retries < 0 ||
       config_.max_retries > 10 || config_.initial_backoff_ms < 0 ||
-      config_.max_backoff_sec < 0)
+      config_.max_backoff_sec < 0 || config_.max_response_bytes == 0)
     return Error{ErrorKind::Configuration, "invalid timeout or retry settings",
                  0, false};
   if (request.model.empty() || request.max_tokens <= 0 ||
@@ -305,6 +305,10 @@ Result<Response> Client::send(const Request &request) const {
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
     const HttpResponse http =
         transport_->post(url, serialized_body, headers, config_.timeout_sec);
+    if (http.body.size() > config_.max_response_bytes) {
+      return Error{ErrorKind::ResponseTooLarge,
+                   "response body exceeds configured size limit", 0, false};
+    }
     const bool transient_http =
         http.status == 429 || (http.status >= 500 && http.status <= 599);
     const bool transient_transport = !http.transport_error.empty();
