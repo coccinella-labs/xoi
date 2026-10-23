@@ -48,9 +48,12 @@ With Ollama running locally and a model available, try the streaming example:
 ./build/xoi_ollama_chat qwen3:8b
 ```
 
-Tool schema validation checks required fields and declared property types only.
-Tool handlers run in-process and are not sandboxed, so applications must
-isolate them.
+Tool schema validation supports `type`, `properties`, `required`, `items`,
+`enum`, and boolean `additionalProperties`. Object properties and array items
+are validated recursively. Unsupported schema keywords are rejected when a
+tool is registered instead of being silently ignored; this is a limited subset,
+not a full JSON Schema implementation. Tool handlers run in-process and are not
+sandboxed, so applications must isolate them.
 
 `Client::send_stream` supports server-sent event responses from Anthropic
 Messages and OpenAI-compatible APIs, and newline-delimited JSON from Ollama.

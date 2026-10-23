@@ -1,50 +1,165 @@
 #include <xoi/agent.hpp>
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 namespace xoi {
 namespace {
 
+bool supported_type(std::string_view type) {
+  constexpr std::array<std::string_view, 7> types = {
+      "string", "integer", "number", "boolean", "object", "array", "null"};
+  return std::find(types.begin(), types.end(), type) != types.end();
+}
+
+bool matches_type(std::string_view type, const nlohmann::json &value) {
+  if (type == "string")
+    return value.is_string();
+  if (type == "integer")
+    return value.is_number_integer();
+  if (type == "number")
+    return value.is_number();
+  if (type == "boolean")
+    return value.is_boolean();
+  if (type == "object")
+    return value.is_object();
+  if (type == "array")
+    return value.is_array();
+  if (type == "null")
+    return value.is_null();
+  return false;
+}
+
+bool supported_schema_keyword(std::string_view keyword) {
+  constexpr std::array<std::string_view, 12> keywords = {
+      "type",        "properties", "required",
+      "items",       "enum",       "additionalProperties",
+      "description", "title",      "default",
+      "examples",    "$schema",    "$comment"};
+  return std::find(keywords.begin(), keywords.end(), keyword) != keywords.end();
+}
+
+std::string validate_schema_definition(const nlohmann::json &schema,
+                                       const std::string &path) {
+  if (!schema.is_object())
+    return path + " must be an object";
+
+  for (auto it = schema.begin(); it != schema.end(); ++it) {
+    if (!supported_schema_keyword(it.key()))
+      return path + " uses unsupported keyword '" + it.key() + "'";
+  }
+  if (schema.contains("type") &&
+      (!schema["type"].is_string() ||
+       !supported_type(schema["type"].get<std::string>())))
+    return path + " type must be a supported JSON type";
+  if (schema.contains("properties")) {
+    if (!schema["properties"].is_object())
+      return path + " properties must be an object";
+    for (auto it = schema["properties"].begin();
+         it != schema["properties"].end(); ++it) {
+      std::string error = validate_schema_definition(
+          it.value(), path + ".properties." + it.key());
+      if (!error.empty())
+        return error;
+    }
+  }
+  if (schema.contains("required")) {
+    if (!schema["required"].is_array())
+      return path + " required must be an array";
+    for (const auto &required : schema["required"]) {
+      if (!required.is_string())
+        return path + " required entries must be strings";
+    }
+  }
+  if (schema.contains("items")) {
+    std::string error =
+        validate_schema_definition(schema["items"], path + ".items");
+    if (!error.empty())
+      return error;
+  }
+  if (schema.contains("enum") &&
+      (!schema["enum"].is_array() || schema["enum"].empty()))
+    return path + " enum must be a non-empty array";
+  if (schema.contains("additionalProperties") &&
+      !schema["additionalProperties"].is_boolean())
+    return path + " additionalProperties must be a boolean";
+  for (const std::string_view annotation :
+       {"description", "title", "$schema", "$comment"}) {
+    if (schema.contains(annotation) && !schema[annotation].is_string())
+      return path + " " + std::string(annotation) + " must be a string";
+  }
+  if (schema.contains("examples") && !schema["examples"].is_array())
+    return path + " examples must be an array";
+  return {};
+}
+
+std::string argument_path(const std::string &parent, const std::string &name) {
+  return parent.empty() ? name : parent + "." + name;
+}
+
+std::string validate_value(const nlohmann::json &schema,
+                           const nlohmann::json &value,
+                           const std::string &path) {
+  if (schema.contains("type")) {
+    const std::string type = schema["type"].get<std::string>();
+    if (!matches_type(type, value))
+      return "argument '" + path + "' must be " + type;
+  }
+  if (schema.contains("enum")) {
+    const auto &values = schema["enum"];
+    if (std::find(values.begin(), values.end(), value) == values.end())
+      return "argument '" + path + "' must be one of the declared enum values";
+  }
+  if (value.is_array() && schema.contains("items")) {
+    for (std::size_t index = 0; index < value.size(); ++index) {
+      std::string error =
+          validate_value(schema["items"], value[index],
+                         path + "[" + std::to_string(index) + "]");
+      if (!error.empty())
+        return error;
+    }
+  }
+  if (!value.is_object())
+    return {};
+
+  const auto properties = schema.find("properties");
+  if (schema.contains("required")) {
+    for (const auto &required : schema["required"]) {
+      const std::string name = required.get<std::string>();
+      if (!value.contains(name))
+        return "missing required argument '" + argument_path(path, name) + "'";
+    }
+  }
+  if (schema.value("additionalProperties", true) == false) {
+    for (auto it = value.begin(); it != value.end(); ++it) {
+      if (properties == schema.end() || !properties->contains(it.key()))
+        return "argument '" + argument_path(path, it.key()) +
+               "' is not allowed";
+    }
+  }
+  if (properties != schema.end()) {
+    for (auto it = properties->begin(); it != properties->end(); ++it) {
+      const auto value_it = value.find(it.key());
+      if (value_it == value.end())
+        continue;
+      std::string error = validate_value(it.value(), value_it.value(),
+                                         argument_path(path, it.key()));
+      if (!error.empty())
+        return error;
+    }
+  }
+  return {};
+}
+
 std::string validate_input(const ToolSpec &spec, const nlohmann::json &input) {
   if (!input.is_object())
     return "tool input must be a JSON object";
 
-  if (spec.input_schema.contains("required") &&
-      spec.input_schema["required"].is_array()) {
-    for (const auto &required : spec.input_schema["required"]) {
-      if (!required.is_string())
-        continue;
-      const std::string name = required.get<std::string>();
-      if (!input.contains(name))
-        return "missing required argument '" + name + "'";
-    }
-  }
-
-  const auto properties = spec.input_schema.find("properties");
-  if (properties == spec.input_schema.end() || !properties->is_object())
-    return {};
-  for (auto it = input.begin(); it != input.end(); ++it) {
-    const auto property = properties->find(it.key());
-    if (property == properties->end() || !property->is_object() ||
-        !property->contains("type") || !(*property)["type"].is_string())
-      continue;
-    const std::string type = (*property)["type"].get<std::string>();
-    const auto &value = it.value();
-    const bool valid = type == "string"    ? value.is_string()
-                       : type == "integer" ? value.is_number_integer()
-                       : type == "number"  ? value.is_number()
-                       : type == "boolean" ? value.is_boolean()
-                       : type == "object"  ? value.is_object()
-                       : type == "array"   ? value.is_array()
-                       : type == "null"    ? value.is_null()
-                                           : true;
-    if (!valid)
-      return "argument '" + it.key() + "' must be " + type;
-  }
-  return {};
+  return validate_value(spec.input_schema, input, {});
 }
 
 std::string final_text(const std::vector<Block> &blocks) {
@@ -66,19 +181,10 @@ std::string ToolRegistry::add(ToolSpec spec, ToolHandler handler) {
     return "tool name is empty";
   if (!handler)
     return "tool handler is empty";
-  if (!spec.input_schema.is_object())
-    return "tool input schema must be an object";
-  if (spec.input_schema.contains("properties") &&
-      !spec.input_schema["properties"].is_object())
-    return "tool input schema properties must be an object";
-  if (spec.input_schema.contains("required")) {
-    if (!spec.input_schema["required"].is_array())
-      return "tool input schema required must be an array";
-    for (const auto &required : spec.input_schema["required"]) {
-      if (!required.is_string())
-        return "tool input schema required entries must be strings";
-    }
-  }
+  std::string schema_error =
+      validate_schema_definition(spec.input_schema, "tool input schema");
+  if (!schema_error.empty())
+    return schema_error;
   if (std::any_of(
           entries_.begin(), entries_.end(),
           [&spec](const Entry &entry) { return entry.spec.name == spec.name; }))
