@@ -3,7 +3,9 @@ Checks: >-
   bugprone-*,
   clang-analyzer-*,
   performance-*,
-  portability-*
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -portability-avoid-pragma-once
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'include/xoi/.*'
 FormatStyle: file

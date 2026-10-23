@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -34,7 +35,7 @@ std::string endpoint(const Config &config) {
 }
 
 std::string error_message(const HttpResponse &response) {
-  try {
+  if (nlohmann::json::accept(response.body)) {
     const auto parsed = nlohmann::json::parse(response.body);
     if (parsed.contains("error")) {
       if (parsed["error"].is_object() && parsed["error"].contains("message") &&
@@ -45,7 +46,6 @@ std::string error_message(const HttpResponse &response) {
     }
     if (parsed.contains("message") && parsed["message"].is_string())
       return parsed["message"].get<std::string>();
-  } catch (const nlohmann::json::parse_error &) {
   }
   return response.body.empty() ? "HTTP request failed" : response.body;
 }
@@ -54,14 +54,11 @@ long retry_after_seconds(const HttpResponse &response) {
   const std::string value = response.header("Retry-After");
   if (value.empty())
     return -1;
-  try {
-    size_t consumed = 0;
-    const long seconds = std::stol(value, &consumed);
-    if (consumed == value.size())
-      return std::max(seconds, 0L);
-  } catch (const std::invalid_argument &) {
-  } catch (const std::out_of_range &) {
-  }
+  long seconds = 0;
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), seconds);
+  if (error == std::errc{} && end == value.data() + value.size())
+    return std::max(seconds, 0L);
 
   const time_t retry_at = curl_getdate(value.c_str(), nullptr);
   if (retry_at < 0)
@@ -132,7 +129,7 @@ nlohmann::json openai_request_json(const Request &request) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, Text>) {
               if (!text.empty())
-                text += "\n";
+                text += '\n';
               text += value.text;
             } else if constexpr (std::is_same_v<T, ToolUse>) {
               tool_calls.push_back({{"id", value.id},
@@ -324,7 +321,8 @@ Result<Response> Client::send(const Request &request) const {
       } else {
         const int64_t exponential_ms =
             static_cast<int64_t>(config_.initial_backoff_ms) *
-            (int64_t{1} << std::min(attempt, 20));
+            static_cast<int64_t>(uint64_t{1} << static_cast<unsigned int>(
+                                     std::min(attempt, 20)));
         wait_ms = std::min(exponential_ms, max_wait_ms);
       }
       if (wait_ms > 0)

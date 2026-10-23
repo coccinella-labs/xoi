@@ -51,7 +51,7 @@ std::string final_text(const std::vector<Block> &blocks) {
   for (const auto &block : blocks) {
     if (const auto *value = std::get_if<Text>(&block)) {
       if (!text.empty())
-        text += "\n";
+        text += '\n';
       text += value->text;
     }
   }

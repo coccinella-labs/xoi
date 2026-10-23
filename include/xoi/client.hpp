@@ -3,13 +3,14 @@
 #include <xoi/transport.hpp>
 #include <xoi/types.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <variant>
 
 namespace xoi {
 
-enum class ErrorKind {
+enum class ErrorKind : std::uint8_t {
   Configuration,
   Transport,
   Http,

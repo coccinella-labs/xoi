@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <string>
 #include <variant>
 #include <vector>
@@ -38,7 +39,7 @@ struct ToolSpec {
                                  {"properties", nlohmann::json::object()}};
 };
 
-enum class Provider {
+enum class Provider : std::uint8_t {
   Anthropic,
   OpenAICompatible,
 };

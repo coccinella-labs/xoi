@@ -8,6 +8,9 @@ include(FetchContent)
 
 find_package(CURL REQUIRED)
 
+option(XOI_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(XOI_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
+
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
@@ -19,6 +22,9 @@ FetchContent_MakeAvailable(nlohmann_json)
 function(xoi_enable_warnings target)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4)
+    if(XOI_WARNINGS_AS_ERRORS)
+      target_compile_options(${target} PRIVATE /WX)
+    endif()
   else()
     target_compile_options(${target} PRIVATE
       -Wall
@@ -27,6 +33,16 @@ function(xoi_enable_warnings target)
       -Wconversion
       -Wshadow
     )
+    if(XOI_WARNINGS_AS_ERRORS)
+      target_compile_options(${target} PRIVATE -Werror)
+    endif()
+    if(XOI_ENABLE_SANITIZERS)
+      target_compile_options(${target} PRIVATE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+      )
+      target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
   endif()
 endfunction()
 

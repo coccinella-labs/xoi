@@ -92,7 +92,8 @@ HttpResponse CurlTransport::post(
 
   HeaderList request_headers;
   for (const auto &[name, value] : headers) {
-    const std::string line = name + ": " + value;
+    std::string line = name;
+    line.append(": ").append(value);
     auto *appended = curl_slist_append(request_headers.value, line.c_str());
     if (!appended) {
       response.transport_error = "curl_slist_append failed";
