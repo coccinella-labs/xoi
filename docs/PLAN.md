@@ -28,8 +28,8 @@ licensed Apache-2.0. The SDK currently provides:
   `tool_use` and `tool_result` representations.
 - A host-supplied tool registry with JSON and typed-input handlers, recursive
   validation for the documented JSON Schema subset, and a bounded synchronous
-  agent loop. Typed handlers use nlohmann JSON conversions; schemas remain
-  explicitly declared by the application.
+  agent loop. Typed handlers use nlohmann JSON conversions; hosts can generate
+  common field schemas from named member pointers or supply an explicit schema.
 - Retry/backoff for selected rate-limit, server, connection, and timeout
   failures; configurable request timeout and response-size limit.
 - Optional sampling parameters, custom API-key headers, OpenAI-compatible
@@ -44,9 +44,9 @@ complete coding-agent framework or a production-proven agentware integration.
 
 | Area | Status | What exists and what remains |
 |---|---|---|
-| C++ type guardrails | Partial | Public structs, enums, `std::variant` content blocks, `Result<T>`, and typed tool handlers provide compile-time structure. Tool input types are selected by the host and decoded through nlohmann JSON; schemas are still explicit rather than generated from C++ types. |
+| C++ type guardrails | Partial | Public structs, enums, `std::variant` content blocks, `Result<T>`, and typed tool handlers provide compile-time structure. An opt-in schema helper infers common member types from explicitly named pointers; C++20 cannot reflect ordinary member names or arbitrary nlohmann serializers, so custom types still need an explicit schema override. |
 | Structured tool calling | Done | Anthropic, OpenAI-compatible, and Ollama adapters parse native tool calls and serialize tool results. The host supplies tools and decides what may execute. |
-| Tool schema validation | Partial | Recursive validation supports type, properties, required, items, enum, boolean additionalProperties, numeric minimum/maximum, string minLength/maxLength, and array minItems/maxItems; string lengths count UTF-8 code points. Unsupported keywords are rejected rather than ignored. Typed handlers deserialize into host-defined C++ types and return decode failures as tool errors. Full JSON Schema and schema-to-C++ generation remain unsupported. |
+| Tool schema validation | Partial | Recursive validation supports type, properties, required, items, enum, boolean additionalProperties, numeric minimum/maximum, string minLength/maxLength, and array minItems/maxItems; string lengths count UTF-8 code points. Common schemas can be generated from explicitly named C++ member pointers, with overrides for custom fields. Unsupported keywords are rejected rather than ignored. Typed handlers deserialize into host-defined C++ types and return decode failures as tool errors. Full JSON Schema and reflection of arbitrary C++ types remain unsupported. |
 | Provider support | Done | Anthropic Messages, generic OpenAI-compatible Chat Completions, and native Ollama chat have request/response tests. Provider-specific extensions outside these protocols are not implied. |
 | Streaming | Partial | Text deltas and completed tool calls are supported for SSE and Ollama NDJSON. The API is blocking/callback-based; there is no async task/future interface, cancellation of an active request, or uniform provider-specific streaming parity beyond tested formats. |
 | Retries and transport failures | Done | Selected 429/5xx and pre-response connection/timeout failures use bounded retries/backoff. Other failures are returned as typed errors. Retry behavior is tested with an injected transport. |
@@ -130,13 +130,13 @@ Coding-agent quality also needs orchestration beyond a provider call:
    checks, secret filtering, and execution gate authoritative. Run the existing
    tool-loop goldens and compare observable behavior before considering a
    default change.
-4. **Extend typed tools deliberately.** `ToolRegistry::add_typed` validates
-   against an explicit schema, decodes a caller-defined C++ input type, and
-   reports JSON decode failures as tool errors. The registry validates a
-   documented recursive subset and rejects unsupported schema keywords. A
-   host-owned verification example demonstrates the boundary without running
-   commands. Automatic schema generation and full JSON Schema support remain
-   out of scope.
+4. **Extend typed tools deliberately.** `ToolRegistry::add_typed` supports
+   explicit schemas and an opt-in schema helper for common C++ member types.
+   Hosts name fields explicitly and can override custom/nested types. The
+   registry validates a documented recursive subset and rejects unsupported
+   keywords. A host-owned verification example demonstrates the boundary
+   without running commands. General C++ reflection and full JSON Schema
+   support remain out of scope.
 5. **Verify proxy and operational behavior.** Explicit proxy configuration is
    available. Test loopback bypass, timeout propagation, retry safety, response
    limits, and transport errors at the installed-package and consumer boundary.

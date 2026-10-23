@@ -1,12 +1,14 @@
 #pragma once
 
 #include <xoi/client.hpp>
+#include <xoi/schema.hpp>
 #include <xoi/types.hpp>
 
 #include <cstdint>
 #include <functional>
 #include <stop_token>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -43,6 +45,40 @@ public:
             0, false});
       }
     });
+  }
+  /// Registers a typed tool and infers common field schemas from member types.
+  /// C++20 cannot reflect member names, so every field must be declared with
+  /// schema_field. Use its schema override for custom field types.
+  template <typename Arguments, typename... Fields>
+  std::string
+  add_typed(std::string name, std::string description,
+            std::function<Result<std::string>(const Arguments &)> handler,
+            Fields... fields) {
+    nlohmann::json properties = nlohmann::json::object();
+    nlohmann::json required = nlohmann::json::array();
+    bool duplicate_name = false;
+    const auto add_field = [&]<typename Field>(Field field) {
+      static_assert(std::is_same_v<typename Field::owner_type, Arguments>,
+                    "all schema fields must belong to the typed arguments");
+      if (properties.contains(field.name))
+        duplicate_name = true;
+      properties[field.name] = std::move(field.schema);
+      if (field.required)
+        required.push_back(std::move(field.name));
+    };
+    (add_field(std::move(fields)), ...);
+    if (duplicate_name)
+      return "tool schema field names must be unique";
+
+    ToolSpec spec;
+    spec.name = std::move(name);
+    spec.description = std::move(description);
+    spec.input_schema = {{"type", "object"},
+                         {"properties", std::move(properties)},
+                         {"additionalProperties", false}};
+    if (!required.empty())
+      spec.input_schema["required"] = std::move(required);
+    return add_typed<Arguments>(spec, std::move(handler));
   }
   /// Returns the registered tool specifications in registration order.
   const std::vector<ToolSpec> &specs() const;
