@@ -1,6 +1,8 @@
 # xoi
 
-xoi is a small C++20 SDK for Anthropic Messages and OpenAI-compatible APIs.
+xoi is a C++20 SDK for Anthropic Messages and OpenAI-compatible APIs.
+
+## Usage
 
 ```cpp
 #include <xoi/client.hpp>
@@ -12,10 +14,17 @@ request.messages = {{"user", {xoi::Text{"Say hello."}}}};
 auto response = client.send(request);
 ```
 
-Build: `cmake -S . -B build && cmake --build build`
+`Config::from_env()` reads the provider credentials from the environment.
 
-TODO: Choose MIT or Apache-2.0 before the first release.
+## Build
 
-Tool schema validation is basic and checks required fields and declared
-property types only. Tool handlers run in-process and are not sandboxed; the
-application is responsible for isolating them.
+```sh
+cmake -S . -B build && cmake --build build
+```
+
+Tool schema validation checks required fields and declared property types only.
+Tool handlers run in-process and are not sandboxed, so applications must
+isolate them.
+
+Streaming is planned and is not implemented yet. The license decision is
+pending authorization; see issue #17.
