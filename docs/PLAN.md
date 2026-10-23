@@ -26,8 +26,8 @@ licensed Apache-2.0. The SDK currently provides:
   API.
 - C++ request, response, message, and content-block types, including native
   `tool_use` and `tool_result` representations.
-- A host-supplied tool registry with JSON and typed-input handlers, basic JSON
-  Schema required-field and property-type checks, and a bounded synchronous
+- A host-supplied tool registry with JSON and typed-input handlers, recursive
+  validation for the documented JSON Schema subset, and a bounded synchronous
   agent loop. Typed handlers use nlohmann JSON conversions; schemas remain
   explicitly declared by the application.
 - Retry/backoff for selected rate-limit, server, connection, and timeout
@@ -46,7 +46,7 @@ complete coding-agent framework or a production-proven agentware integration.
 |---|---|---|
 | C++ type guardrails | Partial | Public structs, enums, `std::variant` content blocks, `Result<T>`, and typed tool handlers provide compile-time structure. Tool input types are selected by the host and decoded through nlohmann JSON; schemas are still explicit rather than generated from C++ types. |
 | Structured tool calling | Done | Anthropic, OpenAI-compatible, and Ollama adapters parse native tool calls and serialize tool results. The host supplies tools and decides what may execute. |
-| Tool schema validation | Partial | Required fields and declared JSON property types are checked before handlers run. Typed handlers deserialize into host-defined C++ types and return decode failures as tool errors. Full JSON Schema constraints and schema-to-C++ generation remain unsupported. |
+| Tool schema validation | Partial | Recursive object/array validation supports type, properties, required, items, enum, and boolean additionalProperties; unsupported keywords are rejected rather than ignored. Typed handlers deserialize into host-defined C++ types and return decode failures as tool errors. Full JSON Schema and schema-to-C++ generation remain unsupported. |
 | Provider support | Done | Anthropic Messages, generic OpenAI-compatible Chat Completions, and native Ollama chat have request/response tests. Provider-specific extensions outside these protocols are not implied. |
 | Streaming | Partial | Text deltas and completed tool calls are supported for SSE and Ollama NDJSON. The API is blocking/callback-based; there is no async task/future interface, cancellation of an active request, or uniform provider-specific streaming parity beyond tested formats. |
 | Retries and transport failures | Done | Selected 429/5xx and pre-response connection/timeout failures use bounded retries/backoff. Other failures are returned as typed errors. Retry behavior is tested with an injected transport. |
@@ -132,10 +132,11 @@ Coding-agent quality also needs orchestration beyond a provider call:
    default change.
 4. **Extend typed tools deliberately.** `ToolRegistry::add_typed` validates
    against an explicit schema, decodes a caller-defined C++ input type, and
-   reports JSON decode failures as tool errors. A host-owned verification
-   example demonstrates the boundary without running commands. Automatic
-   schema generation and broader JSON Schema support remain open; add them only
-   with a clear design and focused tests.
+   reports JSON decode failures as tool errors. The registry validates a
+   documented recursive subset and rejects unsupported schema keywords. A
+   host-owned verification example demonstrates the boundary without running
+   commands. Automatic schema generation and full JSON Schema support remain
+   out of scope.
 5. **Verify proxy and operational behavior.** Explicit proxy configuration is
    available. Test loopback bypass, timeout propagation, retry safety, response
    limits, and transport errors at the installed-package and consumer boundary.

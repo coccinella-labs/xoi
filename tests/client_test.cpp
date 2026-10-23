@@ -1142,6 +1142,147 @@ TEST(ToolRegistryTest, ReturnsTypedDeserializationFailuresAsToolErrors) {
   EXPECT_FALSE(handler_called);
 }
 
+TEST(ToolRegistryTest, ValidatesNestedObjectsAndArrayItems) {
+  xoi::ToolRegistry tools;
+  bool handler_called = false;
+  const nlohmann::json schema = {
+      {"type", "object"},
+      {"properties",
+       {{"settings",
+         {{"type", "object"},
+          {"properties", {{"mode", {{"type", "string"}, {"enum", {"safe"}}}}}},
+          {"required", {"mode"}},
+          {"additionalProperties", false}}},
+        {"limits",
+         {{"type", "array"},
+          {"items",
+           {{"type", "object"},
+            {"properties", {{"count", {{"type", "integer"}}}}},
+            {"required", {"count"}}}}}}}},
+      {"required", {"settings", "limits"}}};
+  EXPECT_TRUE(tools
+                  .add({"configure", "Apply configuration", schema},
+                       [&handler_called](
+                           const nlohmann::json &) -> xoi::Result<std::string> {
+                         handler_called = true;
+                         return std::string{"configured"};
+                       })
+                  .empty());
+
+  const auto result = tools.execute(
+      "configure", {{"settings", {{"mode", "safe"}}},
+                    {"limits", nlohmann::json::array({{{"count", 2}}})}});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result.value(), "configured");
+  EXPECT_TRUE(handler_called);
+}
+
+TEST(ToolRegistryTest, RejectsInvalidNestedValuesAndUnknownProperties) {
+  xoi::ToolRegistry tools;
+  bool handler_called = false;
+  const nlohmann::json schema = {
+      {"type", "object"},
+      {"properties",
+       {{"settings",
+         {{"type", "object"},
+          {"properties", {{"count", {{"type", "integer"}}}}},
+          {"required", {"count"}},
+          {"additionalProperties", false}}}}}};
+  EXPECT_TRUE(tools
+                  .add({"configure", "Apply configuration", schema},
+                       [&handler_called](
+                           const nlohmann::json &) -> xoi::Result<std::string> {
+                         handler_called = true;
+                         return std::string{"unexpected"};
+                       })
+                  .empty());
+
+  const auto invalid_type =
+      tools.execute("configure", {{"settings", {{"count", "many"}}}});
+  ASSERT_FALSE(invalid_type);
+  EXPECT_EQ(invalid_type.error().message,
+            "argument 'settings.count' must be integer");
+  EXPECT_FALSE(handler_called);
+
+  const auto missing_required =
+      tools.execute("configure", {{"settings", nlohmann::json::object()}});
+  ASSERT_FALSE(missing_required);
+  EXPECT_EQ(missing_required.error().message,
+            "missing required argument 'settings.count'");
+  EXPECT_FALSE(handler_called);
+
+  const auto extra_property = tools.execute(
+      "configure", {{"settings", {{"count", 2}, {"extra", true}}}});
+  ASSERT_FALSE(extra_property);
+  EXPECT_EQ(extra_property.error().message,
+            "argument 'settings.extra' is not allowed");
+  EXPECT_FALSE(handler_called);
+}
+
+TEST(ToolRegistryTest, RejectsInvalidArrayItemsAndEnumValues) {
+  xoi::ToolRegistry tools;
+  bool handler_called = false;
+  const nlohmann::json schema = {
+      {"type", "object"},
+      {"properties",
+       {{"mode", {{"type", "string"}, {"enum", {"safe", "strict"}}}},
+        {"counts", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}}};
+  EXPECT_TRUE(tools
+                  .add({"configure", "Apply configuration", schema},
+                       [&handler_called](
+                           const nlohmann::json &) -> xoi::Result<std::string> {
+                         handler_called = true;
+                         return std::string{"unexpected"};
+                       })
+                  .empty());
+
+  const auto invalid_enum =
+      tools.execute("configure", {{"mode", "unsafe"}, {"counts", {1, 2}}});
+  ASSERT_FALSE(invalid_enum);
+  EXPECT_EQ(invalid_enum.error().message,
+            "argument 'mode' must be one of the declared enum values");
+
+  const auto invalid_item =
+      tools.execute("configure", {{"mode", "safe"}, {"counts", {1, "two"}}});
+  ASSERT_FALSE(invalid_item);
+  EXPECT_EQ(invalid_item.error().message,
+            "argument 'counts[1]' must be integer");
+  EXPECT_FALSE(handler_called);
+}
+
+TEST(ToolRegistryTest, RejectsMalformedOrUnsupportedSchemaKeywords) {
+  xoi::ToolRegistry tools;
+  const auto handler = [](const nlohmann::json &) {
+    return xoi::Result<std::string>(std::string{"unused"});
+  };
+
+  EXPECT_EQ(tools.add({"bad_type", "Bad type", {{"type", "decimal"}}}, handler),
+            "tool input schema type must be a supported JSON type");
+  EXPECT_EQ(tools.add({"bad_items",
+                       "Bad items",
+                       {{"type", "object"},
+                        {"properties", {{"values", {{"items", 1}}}}}}},
+                      handler),
+            "tool input schema.properties.values.items must be an object");
+  EXPECT_EQ(tools.add({"bad_enum",
+                       "Bad enum",
+                       {{"type", "string"}, {"enum", nlohmann::json::array()}}},
+                      handler),
+            "tool input schema enum must be a non-empty array");
+  EXPECT_EQ(tools.add({"bad_additional",
+                       "Bad additional",
+                       {{"type", "object"}, {"additionalProperties", "no"}}},
+                      handler),
+            "tool input schema additionalProperties must be a boolean");
+  EXPECT_EQ(tools.add({"ignored_constraint",
+                       "Ignored constraint",
+                       {{"type", "object"}, {"minProperties", 1}}},
+                      handler),
+            "tool input schema uses unsupported keyword 'minProperties'");
+  EXPECT_TRUE(tools.specs().empty());
+}
+
 TEST(AgentTest, ReturnsTypedDeserializationErrorsToTheModel) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
@@ -1284,7 +1425,7 @@ TEST(AgentTest, ReportsProgressCallbackExceptions) {
 TEST(AgentTest, ReturnsArgumentErrorsAsToolResultObservations) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
-       R"({"content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"path":7}}],"stop_reason":"tool_use"})",
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"config":{"path":7}}}],"stop_reason":"tool_use"})",
        {},
        {}},
       {200,
@@ -1298,8 +1439,12 @@ TEST(AgentTest, ReturnsArgumentErrorsAsToolResultObservations) {
                   .add({"read_file",
                         "Read a file",
                         {{"type", "object"},
-                         {"properties", {{"path", {{"type", "string"}}}}},
-                         {"required", {"path"}}}},
+                         {"properties",
+                          {{"config",
+                            {{"type", "object"},
+                             {"properties", {{"path", {{"type", "string"}}}}},
+                             {"required", {"path"}}}}}},
+                         {"required", {"config"}}}},
                        [](const nlohmann::json &) -> xoi::Result<std::string> {
                          ADD_FAILURE() << "invalid arguments must not execute";
                          return std::string{};
@@ -1312,7 +1457,7 @@ TEST(AgentTest, ReturnsArgumentErrorsAsToolResultObservations) {
   const auto follow_up = nlohmann::json::parse(observed->bodies[1]);
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["is_error"], true);
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["content"],
-            "argument 'path' must be string");
+            "argument 'config.path' must be string");
 }
 
 TEST(AgentTest, EnforcesStepLimit) {
