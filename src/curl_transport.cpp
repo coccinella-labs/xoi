@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace xoi {
 namespace {
@@ -124,7 +125,8 @@ HttpResponse
 perform_post(const std::string &url, const std::string &body,
              const std::vector<std::pair<std::string, std::string>> &headers,
              int timeout_sec, std::size_t max_response_bytes,
-             const StreamChunkHandler *on_chunk) {
+             const StreamChunkHandler *on_chunk,
+             const std::optional<std::string> &proxy_url) {
   HttpResponse response;
   const CURLcode global_code = initialize_curl();
   if (global_code != CURLE_OK) {
@@ -188,6 +190,8 @@ perform_post(const std::string &url, const std::string &body,
       !set_option(CURLOPT_HEADERFUNCTION, "HEADERFUNCTION", append_header) ||
       !set_option(CURLOPT_HEADERDATA, "HEADERDATA", &header_state))
     return response;
+  if (proxy_url && !set_option(CURLOPT_PROXY, "PROXY", proxy_url->c_str()))
+    return response;
 
   const CURLcode code = curl_easy_perform(handle.value);
   response.body = std::move(body_state.body);
@@ -226,12 +230,15 @@ perform_post(const std::string &url, const std::string &body,
 
 } // namespace
 
+CurlTransport::CurlTransport(std::optional<std::string> proxy_url)
+    : proxy_url_(std::move(proxy_url)) {}
+
 HttpResponse CurlTransport::post(
     const std::string &url, const std::string &body,
     const std::vector<std::pair<std::string, std::string>> &headers,
     int timeout_sec, std::size_t max_response_bytes) {
   return perform_post(url, body, headers, timeout_sec, max_response_bytes,
-                      nullptr);
+                      nullptr, proxy_url_);
 }
 
 HttpResponse CurlTransport::post_stream(
@@ -240,7 +247,7 @@ HttpResponse CurlTransport::post_stream(
     int timeout_sec, std::size_t max_response_bytes,
     const StreamChunkHandler &on_chunk) {
   return perform_post(url, body, headers, timeout_sec, max_response_bytes,
-                      &on_chunk);
+                      &on_chunk, proxy_url_);
 }
 
 } // namespace xoi

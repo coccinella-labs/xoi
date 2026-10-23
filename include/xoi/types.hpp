@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -59,6 +60,8 @@ struct Request {
   std::vector<Message> messages;
   std::vector<ToolSpec> tools;
   int max_tokens = 1024;
+  std::optional<double> temperature;
+  std::optional<double> top_p;
 };
 
 /// A parsed response from an LLM provider.

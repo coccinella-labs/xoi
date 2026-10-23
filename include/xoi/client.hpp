@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -32,6 +33,12 @@ struct Error {
   int status = 0;
   bool retryable = false;
   TransportFailure transport_failure = TransportFailure::None;
+};
+
+/// Selects the completion-token field used by OpenAI-compatible APIs.
+enum class OpenAITokenLimitParameter : std::uint8_t {
+  MaxTokens,
+  MaxCompletionTokens,
 };
 
 /// Holds either a successful value or an SDK error.
@@ -71,7 +78,13 @@ private:
 struct Config {
   Provider provider = Provider::Anthropic;
   std::string api_key;
+  /// Custom raw API-key header; empty selects the provider's default header.
+  std::string api_key_header;
   std::string base_url;
+  /// Unset inherits libcurl's proxy environment; empty explicitly disables it.
+  std::optional<std::string> proxy_url;
+  OpenAITokenLimitParameter openai_token_limit_parameter =
+      OpenAITokenLimitParameter::MaxTokens;
   int timeout_sec = 60;
   std::size_t max_response_bytes = std::size_t{8} * 1024U * 1024U;
   int max_retries = 3;

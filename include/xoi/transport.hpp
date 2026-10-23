@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -87,6 +88,9 @@ public:
 /// The default libcurl-backed HTTP transport.
 class CurlTransport final : public Transport {
 public:
+  /// An unset proxy inherits libcurl's environment; an empty proxy disables it.
+  explicit CurlTransport(std::optional<std::string> proxy_url = std::nullopt);
+
   /// Sends one POST request with the provided timeout and headers.
   HttpResponse
   post(const std::string &url, const std::string &body,
@@ -97,6 +101,9 @@ public:
               const std::vector<std::pair<std::string, std::string>> &headers,
               int timeout_sec, std::size_t max_response_bytes,
               const StreamChunkHandler &on_chunk) override;
+
+private:
+  std::optional<std::string> proxy_url_;
 };
 
 } // namespace xoi

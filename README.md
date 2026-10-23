@@ -25,7 +25,15 @@ int main() {
 `Config::from_env()` reads the provider credentials from the environment.
 For Ollama, use `Config::from_env(xoi::Provider::Ollama)`; it defaults to
 `http://localhost:11434` and does not require an API key. `XOI_BASE_URL` can
-override the endpoint.
+override the endpoint. OpenAI-compatible providers can select the
+`max_completion_tokens` field with `XOI_OPENAI_TOKEN_LIMIT_PARAMETER`; the
+default is `max_tokens`. Set `XOI_API_KEY_HEADER` when a provider expects the
+raw key in a custom header, such as `X-API-Key`.
+
+`XOI_PROXY_URL` explicitly overrides libcurl's proxy environment. An unset
+value leaves libcurl's defaults in effect; an empty value disables proxy use.
+Requests can set optional `temperature` and `top_p` sampling values in
+`xoi::Request`.
 
 ## Build
 
