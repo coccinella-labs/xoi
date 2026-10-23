@@ -307,6 +307,7 @@ TEST(ClientTest, EnumJsonSerializationPreservesUnderlyingValues) {
   EXPECT_EQ(nlohmann::json(xoi::Provider::OpenAICompatible), 1);
   EXPECT_EQ(nlohmann::json(xoi::ErrorKind::Configuration), 0);
   EXPECT_EQ(nlohmann::json(xoi::ErrorKind::Limit), 4);
+  EXPECT_EQ(nlohmann::json(xoi::TransportFailure::Connection), 6);
   EXPECT_EQ(static_cast<unsigned int>(xoi::Provider::OpenAICompatible), 1U);
   EXPECT_EQ(static_cast<unsigned int>(xoi::ErrorKind::Limit), 4U);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,7 +9,7 @@
 namespace xoi {
 
 /// Identifies a failure reported by the HTTP transport.
-enum class TransportFailure {
+enum class TransportFailure : std::uint8_t {
   None,
   Initialization,
   HandleCreation,
