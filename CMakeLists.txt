@@ -86,7 +86,11 @@ if(BUILD_TESTING)
   if(WIN32)
     target_compile_definitions(xoi_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   endif()
-  target_link_libraries(xoi_tests PRIVATE xoi::xoi GTest::gtest_main)
+  target_link_libraries(xoi_tests PRIVATE
+    xoi::xoi
+    GTest::gtest_main
+    CURL::libcurl
+  )
   xoi_enable_warnings(xoi_tests)
   include(GoogleTest)
   gtest_discover_tests(xoi_tests)
