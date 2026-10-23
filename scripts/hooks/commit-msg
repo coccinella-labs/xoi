@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+message_file="${1:?commit message file is required}"
+IFS= read -r subject < "$message_file" || [[ -n "${subject:-}" ]]
+
+if [[ ! "$subject" =~ ^.+\ \(#[0-9]+\)$ ]]; then
+  echo "error: commit subject must end with an issue number, like (#14)" >&2
+  exit 1
+fi
+
+if (( ${#subject} > 72 )); then
+  echo "error: commit subject must be at most 72 characters" >&2
+  exit 1
+fi
+
+if LC_ALL=C grep -Fq -- $'\xe2\x80\x94' "$message_file"; then
+  echo "error: commit message must not contain an em dash" >&2
+  exit 1
+fi
