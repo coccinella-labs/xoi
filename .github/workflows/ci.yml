@@ -43,6 +43,8 @@ jobs:
         run: clang-tidy -p build src/agent.cpp src/client.cpp src/curl_transport.cpp
       - name: Check repository hygiene
         run: python3 scripts/check_hygiene.py
+      - name: Check for em dashes
+        run: bash scripts/check-dashes.sh
 
   sanitizers:
     runs-on: ubuntu-latest

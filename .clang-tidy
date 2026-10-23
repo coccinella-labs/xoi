@@ -9,3 +9,5 @@ Checks: >-
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'include/xoi/.*'
 FormatStyle: file
+# Exclude this check because public headers follow the repository's pragma once convention.
+# Exclude this check because the transport interface necessarily places two string arguments together.
