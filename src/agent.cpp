@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <utility>
 
 namespace xoi {
@@ -116,13 +117,45 @@ Result<AgentResponse> run_agent(Client &client, Request request,
   AgentResponse result;
   std::map<std::string, std::pair<std::string, bool>> previous_results;
   std::map<std::string, int> repeat_counts;
+  const auto cancelled = [] {
+    return Error{ErrorKind::Cancelled, "agent run cancelled", 0, false};
+  };
+  const auto notify =
+      [&options](const AgentEvent &event) -> std::optional<Error> {
+    if (!options.on_event)
+      return std::nullopt;
+    try {
+      options.on_event(event);
+    } catch (const std::exception &error) {
+      return Error{ErrorKind::Callback,
+                   std::string("agent progress callback failed: ") +
+                       error.what(),
+                   0, false};
+    } catch (...) {
+      return Error{ErrorKind::Callback, "agent progress callback failed", 0,
+                   false};
+    }
+    return std::nullopt;
+  };
 
   for (int step = 0; step < options.max_steps; ++step) {
+    if (options.stop_token.stop_requested())
+      return cancelled();
+    if (const auto error =
+            notify({AgentEventKind::ModelRequestStarted, step + 1, {}, false}))
+      return *error;
+    if (options.stop_token.stop_requested())
+      return cancelled();
     auto response = client.send(request);
     if (!response)
       return response.error();
     ++result.steps;
     request.messages.push_back({"assistant", response.value().content});
+    if (const auto error = notify(
+            {AgentEventKind::ModelResponseReceived, step + 1, {}, false}))
+      return *error;
+    if (options.stop_token.stop_requested())
+      return cancelled();
 
     std::vector<Block> tool_results;
     std::vector<const ToolUse *> calls;
@@ -155,10 +188,18 @@ Result<AgentResponse> run_agent(Client &client, Request request,
     }
 
     for (const ToolUse *call : calls) {
+      if (options.stop_token.stop_requested())
+        return cancelled();
       ++result.tool_calls;
       const std::string key = call->name + "\n" + call->input.dump();
       const auto previous = previous_results.find(key);
       if (previous != previous_results.end()) {
+        if (const auto error =
+                notify({AgentEventKind::ToolCallRepeated, step + 1, call->name,
+                        previous->second.second}))
+          return *error;
+        if (options.stop_token.stop_requested())
+          return cancelled();
         ++repeat_counts[key];
         tool_results.push_back(
             {ToolResult{call->id,
@@ -169,7 +210,13 @@ Result<AgentResponse> run_agent(Client &client, Request request,
                             "arguments.",
                         previous->second.second}});
       } else {
+        if (const auto error = notify({AgentEventKind::ToolExecutionStarted,
+                                       step + 1, call->name, false}))
+          return *error;
+        if (options.stop_token.stop_requested())
+          return cancelled();
         auto tool_result = tools.execute(call->name, call->input);
+        const bool is_error = !tool_result;
         if (tool_result) {
           previous_results.emplace(key,
                                    std::make_pair(tool_result.value(), false));
@@ -181,6 +228,11 @@ Result<AgentResponse> run_agent(Client &client, Request request,
           tool_results.push_back(
               {ToolResult{call->id, tool_result.error().message, true}});
         }
+        if (const auto error = notify({AgentEventKind::ToolExecutionCompleted,
+                                       step + 1, call->name, is_error}))
+          return *error;
+        if (options.stop_token.stop_requested())
+          return cancelled();
       }
     }
     request.messages.push_back({"user", std::move(tool_results)});
