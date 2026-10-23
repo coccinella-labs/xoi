@@ -42,6 +42,11 @@ Messages and OpenAI-compatible APIs, and newline-delimited JSON from Ollama.
 It delivers text deltas to a callback and returns any completed tool calls
 with the final response.
 
+`run_agent` can observe model/tool lifecycle progress and accepts a
+`std::stop_token` for cooperative cancellation between blocking model requests
+and tool calls. Cancellation does not interrupt an active request or handler.
+Progress events include tool names, but not tool arguments or results.
+
 ## License
 
 Apache-2.0. Copyright (c) 2026 coccinella-labs. See [LICENSE](LICENSE).

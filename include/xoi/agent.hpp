@@ -4,6 +4,7 @@
 #include <xoi/types.hpp>
 
 #include <functional>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -34,11 +35,30 @@ private:
   std::vector<ToolSpec> specs_;
 };
 
-/// Bounds the number of model steps and tool calls in an agent run.
+/// Identifies a lifecycle event emitted during an agent run.
+enum class AgentEventKind {
+  ModelRequestStarted,
+  ModelResponseReceived,
+  ToolExecutionStarted,
+  ToolExecutionCompleted,
+  ToolCallRepeated,
+};
+
+/// Progress data that does not include tool arguments or results.
+struct AgentEvent {
+  AgentEventKind kind;
+  int step = 0;
+  std::string tool_name;
+  bool is_error = false;
+};
+
+/// Bounds an agent run and optionally observes progress and cancellation.
 struct AgentOptions {
   int max_steps = 8;
   int max_tool_calls = 32;
   int max_repeats_per_tool_call = 3;
+  std::stop_token stop_token;
+  std::function<void(const AgentEvent &)> on_event;
 };
 
 /// Summarizes a completed agent run.
@@ -50,6 +70,8 @@ struct AgentResponse {
 };
 
 /// Runs a blocking tool-call conversation using the supplied registry.
+/// Cancellation is checked between model requests and tool calls; it does not
+/// interrupt an active transport request or tool handler.
 Result<AgentResponse> run_agent(Client &client, Request request,
                                 const ToolRegistry &tools,
                                 AgentOptions options = {});

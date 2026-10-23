@@ -22,6 +22,7 @@ enum class ErrorKind : std::uint8_t {
   Limit,
   ResponseTooLarge,
   Callback,
+  Cancelled,
 };
 
 /// Describes an SDK or provider error without throwing for request failures.

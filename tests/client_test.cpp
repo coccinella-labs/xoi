@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <deque>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -942,6 +943,111 @@ TEST(AgentTest, ExecutesToolsAndSendsResultsBackToTheModel) {
             "contents of README.md");
 }
 
+TEST(AgentTest, CancelsBeforeMakingAProviderRequest) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  std::stop_source stop_source;
+  stop_source.request_stop();
+  xoi::AgentOptions options;
+  options.stop_token = stop_source.get_token();
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(observed->calls(), 0U);
+}
+
+TEST(AgentTest, ReportsOrderedProgressWithoutToolArgumentsOrResults) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"path":"private.txt"}}]})",
+       {},
+       {}},
+      {200, R"({"content":[{"type":"text","text":"done"}]})", {}, {}}});
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  EXPECT_TRUE(tools
+                  .add({"read_file", "Read a file", {{"type", "object"}}},
+                       [](const nlohmann::json &) {
+                         return xoi::Result<std::string>("private contents");
+                       })
+                  .empty());
+  std::vector<xoi::AgentEvent> events;
+  xoi::AgentOptions options;
+  options.on_event = [&events](const xoi::AgentEvent &event) {
+    events.push_back(event);
+  };
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_TRUE(result);
+  ASSERT_EQ(events.size(), 6U);
+  EXPECT_EQ(events[0].kind, xoi::AgentEventKind::ModelRequestStarted);
+  EXPECT_EQ(events[0].step, 1);
+  EXPECT_EQ(events[1].kind, xoi::AgentEventKind::ModelResponseReceived);
+  EXPECT_EQ(events[2].kind, xoi::AgentEventKind::ToolExecutionStarted);
+  EXPECT_EQ(events[2].tool_name, "read_file");
+  EXPECT_EQ(events[3].kind, xoi::AgentEventKind::ToolExecutionCompleted);
+  EXPECT_FALSE(events[3].is_error);
+  EXPECT_EQ(events[4].kind, xoi::AgentEventKind::ModelRequestStarted);
+  EXPECT_EQ(events[4].step, 2);
+  EXPECT_EQ(events[5].kind, xoi::AgentEventKind::ModelResponseReceived);
+  EXPECT_TRUE(events[2].tool_name.find("private") == std::string::npos);
+}
+
+TEST(AgentTest, CancellationFromProgressCallbackPreventsToolExecution) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"noop","input":{}}]})",
+       {},
+       {}}});
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  int executions = 0;
+  EXPECT_TRUE(tools
+                  .add({"noop", "No operation", {{"type", "object"}}},
+                       [&executions](const nlohmann::json &) {
+                         ++executions;
+                         return xoi::Result<std::string>("done");
+                       })
+                  .empty());
+  std::stop_source stop_source;
+  xoi::AgentOptions options;
+  options.stop_token = stop_source.get_token();
+  options.on_event = [&stop_source](const xoi::AgentEvent &event) {
+    if (event.kind == xoi::AgentEventKind::ToolExecutionStarted)
+      stop_source.request_stop();
+  };
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(executions, 0);
+}
+
+TEST(AgentTest, ReportsProgressCallbackExceptions) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  xoi::AgentOptions options;
+  options.on_event = [](const xoi::AgentEvent &) {
+    throw std::runtime_error("observer failed");
+  };
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Callback);
+  EXPECT_EQ(result.error().message,
+            "agent progress callback failed: observer failed");
+  EXPECT_EQ(observed->calls(), 0U);
+}
+
 TEST(AgentTest, ReturnsArgumentErrorsAsToolResultObservations) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
@@ -994,8 +1100,10 @@ TEST(AgentTest, EnforcesStepLimit) {
                        })
                   .empty());
 
-  const auto result =
-      xoi::run_agent(client, test_request(), tools, xoi::AgentOptions{1, 2});
+  xoi::AgentOptions options;
+  options.max_steps = 1;
+  options.max_tool_calls = 2;
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
 
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::Limit);
