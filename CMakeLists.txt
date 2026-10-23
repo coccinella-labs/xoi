@@ -4,9 +4,31 @@ project(xoi VERSION 0.1.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
+include(FetchContent)
 
 find_package(CURL REQUIRED)
-find_package(nlohmann_json 3.10 REQUIRED)
+
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+function(xoi_enable_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4)
+  else()
+    target_compile_options(${target} PRIVATE
+      -Wall
+      -Wextra
+      -Wpedantic
+      -Wconversion
+      -Wshadow
+    )
+  endif()
+endfunction()
 
 add_library(xoi
   src/agent.cpp
@@ -18,29 +40,35 @@ target_compile_features(xoi PUBLIC cxx_std_20)
 target_include_directories(xoi
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(xoi PUBLIC nlohmann_json::nlohmann_json PRIVATE CURL::libcurl)
+target_link_libraries(xoi
+  PRIVATE
+    CURL::libcurl
+)
+xoi_enable_warnings(xoi)
 
 if(BUILD_TESTING)
-  find_package(GTest QUIET)
-  if(NOT GTest_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-      googletest
-      URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(googletest)
-  endif()
+  set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
+    URL_HASH SHA256=7b42b4d6ed48810c5362c265a17faebe90dc2373c885e5216439d37927f02926
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(googletest)
   add_executable(xoi_tests tests/client_test.cpp)
   target_link_libraries(xoi_tests PRIVATE xoi::xoi GTest::gtest_main)
+  xoi_enable_warnings(xoi_tests)
   include(GoogleTest)
   gtest_discover_tests(xoi_tests)
 endif()
 
 add_executable(xoi_chat examples/chat.cpp)
 target_link_libraries(xoi_chat PRIVATE xoi::xoi)
+xoi_enable_warnings(xoi_chat)
 
 install(TARGETS xoi EXPORT xoiTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -48,6 +76,10 @@ install(TARGETS xoi EXPORT xoiTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY
+  ${nlohmann_json_SOURCE_DIR}/include/nlohmann
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 install(EXPORT xoiTargets
   FILE xoiTargets.cmake
   NAMESPACE xoi::
