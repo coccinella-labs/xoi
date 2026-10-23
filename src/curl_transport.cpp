@@ -193,9 +193,10 @@ HttpResponse CurlTransport::post(
         curl_easy_strerror(info_code);
     return response;
   }
-  response.status = static_cast<int>(
-      (std::clamp)(status_code, 0L,
-                   static_cast<long>((std::numeric_limits<int>::max)())));
+  const long max_status = static_cast<long>((std::numeric_limits<int>::max)());
+  response.status = static_cast<int>(status_code < 0            ? 0
+                                     : status_code > max_status ? max_status
+                                                                : status_code);
   return response;
 }
 
