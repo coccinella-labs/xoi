@@ -1,6 +1,7 @@
 # xoi
 
-xoi is a C++20 SDK for Anthropic Messages and OpenAI-compatible APIs.
+xoi is a C++20 SDK for Anthropic Messages, OpenAI-compatible APIs, and native
+Ollama chat.
 
 ## Usage
 
@@ -22,6 +23,9 @@ int main() {
 ```
 
 `Config::from_env()` reads the provider credentials from the environment.
+For Ollama, use `Config::from_env(xoi::Provider::Ollama)`; it defaults to
+`http://localhost:11434` and does not require an API key. `XOI_BASE_URL` can
+override the endpoint.
 
 ## Build
 
@@ -34,8 +38,9 @@ Tool handlers run in-process and are not sandboxed, so applications must
 isolate them.
 
 `Client::send_stream` supports server-sent event responses from Anthropic
-Messages and OpenAI-compatible APIs. It delivers text deltas to a callback and
-returns any completed tool calls with the final response.
+Messages and OpenAI-compatible APIs, and newline-delimited JSON from Ollama.
+It delivers text deltas to a callback and returns any completed tool calls
+with the final response.
 
 ## License
 

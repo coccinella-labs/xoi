@@ -29,6 +29,8 @@ std::string endpoint(const Config &config) {
   const std::string base = strip_trailing_slashes(config.base_url);
   if (config.provider == Provider::Anthropic)
     return base + "/v1/messages";
+  if (config.provider == Provider::Ollama)
+    return base + "/api/chat";
   return base + "/chat/completions";
 }
 
@@ -179,6 +181,63 @@ nlohmann::json openai_request_json(const Request &request, bool streaming) {
   return body;
 }
 
+nlohmann::json ollama_request_json(const Request &request, bool streaming) {
+  nlohmann::json messages = nlohmann::json::array();
+  if (!request.system.empty())
+    messages.push_back({{"role", "system"}, {"content", request.system}});
+
+  for (const auto &message : request.messages) {
+    nlohmann::json tool_calls = nlohmann::json::array();
+    std::string text;
+    for (const auto &block : message.content) {
+      std::visit(
+          [&tool_calls, &text](const auto &value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, Text>) {
+              if (!text.empty())
+                text += '\n';
+              text += value.text;
+            } else if constexpr (std::is_same_v<T, ToolUse>) {
+              tool_calls.push_back(
+                  {{"function",
+                    {{"name", value.name}, {"arguments", value.input}}}});
+            }
+          },
+          block);
+    }
+    if (message.role == "assistant") {
+      nlohmann::json assistant{{"role", "assistant"}};
+      assistant["content"] = text;
+      if (!tool_calls.empty())
+        assistant["tool_calls"] = std::move(tool_calls);
+      messages.push_back(std::move(assistant));
+    } else {
+      for (const auto &block : message.content) {
+        if (const auto *result = std::get_if<ToolResult>(&block))
+          messages.push_back({{"role", "tool"}, {"content", result->content}});
+      }
+      if (!text.empty() || message.content.empty())
+        messages.push_back({{"role", message.role}, {"content", text}});
+    }
+  }
+
+  nlohmann::json body{{"model", request.model},
+                      {"messages", messages},
+                      {"options", {{"num_predict", request.max_tokens}}}};
+  if (!request.tools.empty()) {
+    body["tools"] = nlohmann::json::array();
+    for (const auto &tool : request.tools) {
+      body["tools"].push_back({{"type", "function"},
+                               {"function",
+                                {{"name", tool.name},
+                                 {"description", tool.description},
+                                 {"parameters", tool.input_schema}}}});
+    }
+  }
+  body["stream"] = streaming;
+  return body;
+}
+
 Response parse_anthropic_response(const nlohmann::json &body) {
   if (!body.contains("content") || !body["content"].is_array())
     throw nlohmann::json::type_error::create(302, "content must be an array",
@@ -230,6 +289,39 @@ Response parse_openai_response(const nlohmann::json &body) {
             302, "tool call requires a nonempty id, name, and object arguments",
             &call);
       response.content.push_back({ToolUse{id, name, std::move(arguments)}});
+    }
+  }
+  return response;
+}
+
+Response parse_ollama_response(const nlohmann::json &body) {
+  if (!body.contains("message") || !body["message"].is_object())
+    throw nlohmann::json::type_error::create(302, "message is missing", &body);
+  const auto &message = body["message"];
+  Response response;
+  response.stop_reason = body.value("done_reason", "");
+  if (message.contains("content") && message["content"].is_string()) {
+    response.content.push_back({Text{message["content"].get<std::string>()}});
+  }
+  if (message.contains("tool_calls")) {
+    if (!message["tool_calls"].is_array())
+      throw nlohmann::json::type_error::create(
+          302, "tool_calls must be an array", &message);
+    std::size_t index = 0;
+    for (const auto &call : message["tool_calls"]) {
+      if (!call.contains("function") || !call["function"].is_object())
+        throw nlohmann::json::type_error::create(
+            302, "tool call function is missing", &call);
+      const auto &function = call["function"];
+      const std::string name = function.value("name", "");
+      const nlohmann::json input =
+          function.value("arguments", nlohmann::json::object());
+      if (name.empty() || !input.is_object())
+        throw nlohmann::json::type_error::create(
+            302, "tool call requires a nonempty name and object arguments",
+            &call);
+      response.content.push_back(
+          {ToolUse{"ollama-tool-" + std::to_string(index++), name, input}});
     }
   }
   return response;
@@ -527,6 +619,148 @@ private:
   std::map<std::size_t, StreamBlock> blocks_;
 };
 
+class OllamaStreamDecoder {
+public:
+  explicit OllamaStreamDecoder(
+      const std::function<void(std::string_view)> &on_text_delta)
+      : on_text_delta_(on_text_delta) {}
+
+  void feed(std::string_view chunk) {
+    if (!error_.empty())
+      return;
+    for (const char character : chunk) {
+      if (character == '\n') {
+        process_line();
+        line_.clear();
+      } else {
+        line_.push_back(character);
+      }
+      if (!error_.empty())
+        return;
+    }
+  }
+
+  void finish() {
+    if (!line_.empty()) {
+      process_line();
+      line_.clear();
+    }
+  }
+
+  const std::string &error() const {
+    return error_;
+  }
+
+  const std::exception_ptr &callback_exception() const {
+    return callback_exception_;
+  }
+
+  Result<Response> response() const {
+    if (!saw_event_)
+      return protocol_error("stream response contained no events");
+    Response response;
+    response.stop_reason = stop_reason_;
+    if (!text_.empty())
+      response.content.push_back({Text{text_}});
+    for (std::size_t index = 0; index < tools_.size(); ++index) {
+      const auto &tool = tools_[index];
+      if (tool.name.empty() || !tool.input.is_object())
+        return protocol_error(
+            "streamed tool call requires a nonempty name and object arguments");
+      response.content.push_back({ToolUse{
+          "ollama-tool-" + std::to_string(index), tool.name, tool.input}});
+    }
+    return response;
+  }
+
+private:
+  struct StreamTool {
+    std::string name;
+    nlohmann::json input = nlohmann::json::object();
+  };
+
+  void process_line() {
+    if (!line_.empty() && line_.back() == '\r')
+      line_.pop_back();
+    if (line_.empty())
+      return;
+    nlohmann::json event;
+    try {
+      event = nlohmann::json::parse(line_);
+    } catch (const nlohmann::json::exception &error) {
+      error_ = std::string("invalid Ollama streaming event: ") + error.what();
+      return;
+    }
+    if (!event.is_object()) {
+      error_ = "Ollama streaming event must be an object";
+      return;
+    }
+    saw_event_ = true;
+    if (event.contains("error")) {
+      error_ = "Ollama streaming error: " +
+               (event["error"].is_string() ? event["error"].get<std::string>()
+                                           : event["error"].dump());
+      return;
+    }
+    if (event.contains("done_reason") && event["done_reason"].is_string())
+      stop_reason_ = event["done_reason"].get<std::string>();
+    if (!event.contains("message"))
+      return;
+    if (!event["message"].is_object()) {
+      error_ = "Ollama streaming message must be an object";
+      return;
+    }
+    const auto &message = event["message"];
+    if (message.contains("content")) {
+      if (!message["content"].is_string()) {
+        error_ = "Ollama streaming content must be a string";
+        return;
+      }
+      const auto &text = message["content"].get_ref<const std::string &>();
+      text_.append(text);
+      if (!text.empty()) {
+        try {
+          on_text_delta_(text);
+        } catch (...) {
+          callback_exception_ = std::current_exception();
+          throw;
+        }
+      }
+    }
+    if (!message.contains("tool_calls"))
+      return;
+    if (!message["tool_calls"].is_array()) {
+      error_ = "Ollama streaming tool_calls must be an array";
+      return;
+    }
+    for (const auto &call : message["tool_calls"]) {
+      if (!call.contains("function") || !call["function"].is_object()) {
+        error_ = "Ollama streaming tool call function is missing";
+        return;
+      }
+      const auto &function = call["function"];
+      const std::string name = function.value("name", "");
+      const nlohmann::json input =
+          function.value("arguments", nlohmann::json::object());
+      if (name.empty() || !input.is_object()) {
+        error_ =
+            "Ollama streaming tool call requires a name and object arguments";
+        return;
+      }
+      tools_.push_back({name, input});
+    }
+  }
+
+  const std::function<void(std::string_view)> &on_text_delta_;
+  std::string line_;
+  std::string text_;
+  std::string stop_reason_;
+  std::string error_;
+  std::exception_ptr callback_exception_;
+  bool saw_event_ = false;
+  std::vector<StreamTool> tools_;
+};
+
 } // namespace
 
 Config Config::from_env(Provider provider) {
@@ -539,6 +773,11 @@ Config Config::from_env(Provider provider) {
     config.base_url = detail::read_environment_variable("XOI_BASE_URL");
     if (config.base_url.empty())
       config.base_url = "https://api.anthropic.com";
+  } else if (provider == Provider::Ollama) {
+    config.api_key = detail::read_environment_variable("XOI_API_KEY");
+    config.base_url = detail::read_environment_variable("XOI_BASE_URL");
+    if (config.base_url.empty())
+      config.base_url = "http://localhost:11434";
   } else {
     config.api_key = detail::read_environment_variable("XOI_API_KEY");
     if (config.api_key.empty())
@@ -571,7 +810,7 @@ Result<Response> Client::send_stream(
 Result<Response> Client::send_impl(
     const Request &request,
     const std::function<void(std::string_view)> *on_text_delta) const {
-  if (config_.api_key.empty())
+  if (config_.provider != Provider::Ollama && config_.api_key.empty())
     return Error{ErrorKind::Configuration, "API key is empty", 0, false};
   if (config_.base_url.empty())
     return Error{ErrorKind::Configuration, "base URL is empty", 0, false};
@@ -600,31 +839,47 @@ Result<Response> Client::send_impl(
   const auto body =
       config_.provider == Provider::Anthropic
           ? anthropic_request_json(request, on_text_delta != nullptr)
+      : config_.provider == Provider::Ollama
+          ? ollama_request_json(request, on_text_delta != nullptr)
           : openai_request_json(request, on_text_delta != nullptr);
   std::vector<std::pair<std::string, std::string>> headers{
       {"Content-Type", "application/json"}};
   if (on_text_delta)
-    headers.emplace_back("Accept", "text/event-stream");
+    headers.emplace_back("Accept", config_.provider == Provider::Ollama
+                                       ? "application/x-ndjson"
+                                       : "text/event-stream");
   if (config_.provider == Provider::Anthropic) {
     headers.emplace_back("x-api-key", config_.api_key);
     headers.emplace_back("anthropic-version", "2023-06-01");
-  } else {
+  } else if (config_.provider == Provider::OpenAICompatible ||
+             !config_.api_key.empty()) {
     headers.emplace_back("Authorization", "Bearer " + config_.api_key);
   }
 
   const std::string url = endpoint(config_);
   const std::string serialized_body = body.dump();
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
-    std::unique_ptr<SseDecoder> decoder;
+    std::unique_ptr<SseDecoder> sse_decoder;
+    std::unique_ptr<OllamaStreamDecoder> ollama_decoder;
     std::exception_ptr callback_exception;
     HttpResponse http;
     if (on_text_delta) {
-      decoder = std::make_unique<SseDecoder>(config_.provider, *on_text_delta);
+      if (config_.provider == Provider::Ollama) {
+        ollama_decoder = std::make_unique<OllamaStreamDecoder>(*on_text_delta);
+      } else {
+        sse_decoder =
+            std::make_unique<SseDecoder>(config_.provider, *on_text_delta);
+      }
       const StreamChunkHandler on_chunk = [&](std::string_view chunk) {
         try {
-          decoder->feed(chunk);
+          if (ollama_decoder)
+            ollama_decoder->feed(chunk);
+          else
+            sse_decoder->feed(chunk);
         } catch (...) {
-          callback_exception = decoder->callback_exception();
+          callback_exception = ollama_decoder
+                                   ? ollama_decoder->callback_exception()
+                                   : sse_decoder->callback_exception();
           throw;
         }
       };
@@ -699,7 +954,10 @@ Result<Response> Client::send_impl(
 
     if (on_text_delta) {
       try {
-        decoder->finish();
+        if (ollama_decoder)
+          ollama_decoder->finish();
+        else
+          sse_decoder->finish();
       } catch (const std::exception &error) {
         return Error{ErrorKind::Callback,
                      std::string("stream callback failed: ") + error.what(), 0,
@@ -708,16 +966,21 @@ Result<Response> Client::send_impl(
         return Error{ErrorKind::Callback, "stream callback failed", 0, false,
                      TransportFailure::Callback};
       }
-      if (!decoder->error().empty())
-        return protocol_error(decoder->error());
-      return decoder->response();
+      const std::string &stream_error =
+          ollama_decoder ? ollama_decoder->error() : sse_decoder->error();
+      if (!stream_error.empty())
+        return protocol_error(stream_error);
+      return ollama_decoder ? ollama_decoder->response()
+                            : sse_decoder->response();
     }
 
     try {
       const auto parsed = nlohmann::json::parse(http.body);
-      return config_.provider == Provider::Anthropic
-                 ? Result<Response>(parse_anthropic_response(parsed))
-                 : Result<Response>(parse_openai_response(parsed));
+      if (config_.provider == Provider::Anthropic)
+        return parse_anthropic_response(parsed);
+      if (config_.provider == Provider::Ollama)
+        return parse_ollama_response(parsed);
+      return parse_openai_response(parsed);
     } catch (const nlohmann::json::exception &error) {
       return protocol_error(std::string("invalid API response: ") +
                             error.what());

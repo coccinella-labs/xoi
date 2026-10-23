@@ -49,6 +49,7 @@ struct ToolSpec {
 enum class Provider : std::uint8_t {
   Anthropic,
   OpenAICompatible,
+  Ollama,
 };
 
 /// A request sent to an LLM provider.
