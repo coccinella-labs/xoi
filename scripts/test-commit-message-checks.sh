@@ -54,7 +54,10 @@ git -C "$tmpdir" commit --allow-empty -qm 'Base commit (#1)'
 base="$(git -C "$tmpdir" rev-parse HEAD)"
 git -C "$tmpdir" commit --allow-empty -qm 'Valid change (#14)'
 head="$(git -C "$tmpdir" rev-parse HEAD)"
+git -C "$tmpdir" update-ref refs/remotes/origin/main "$base"
 (cd "$tmpdir" && "$checker" "$base" "$head")
+(cd "$tmpdir" && "$checker" missing-before-sha "$head")
+(cd "$tmpdir" && "$checker" 0000000000000000000000000000000000000000 "$head")
 
 for content in \
   'Missing issue suffix' \
@@ -76,6 +79,15 @@ Generated-by: tool'; do
     echo "error: CI checker accepted an invalid commit message" >&2
     exit 1
   fi
+  if (cd "$tmpdir" && "$checker" missing-before-sha "$head") >/dev/null 2>&1; then
+    echo "error: CI checker accepted an invalid message with a missing base" >&2
+    exit 1
+  fi
 done
+
+git -C "$tmpdir" commit --allow-empty -qm 'Valid fallback head (#14)'
+head="$(git -C "$tmpdir" rev-parse HEAD)"
+git -C "$tmpdir" update-ref refs/remotes/origin/main "$head"
+(cd "$tmpdir" && "$checker" missing-before-sha "$head")
 
 echo "Commit-message hook and CI checks passed acceptance and rejection cases."
