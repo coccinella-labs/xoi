@@ -62,6 +62,14 @@ with the final response.
 and tool calls. Cancellation does not interrupt an active request or handler.
 Progress events include tool names, but not tool arguments or results.
 
+`ToolRegistry::add_typed<Arguments>` converts a tool's JSON input to a
+caller-defined C++ type using nlohmann JSON's `from_json` customization. The
+tool's JSON Schema is still declared explicitly and must agree with that
+conversion. Decode errors are returned as tool errors for the model to observe.
+See `xoi_host_verification` for a host-owned tool example. It returns
+verification output supplied by the application; it does not run commands or
+provide sandboxing, authorization, or filesystem policy.
+
 ## License
 
 Apache-2.0. Copyright (c) 2026 coccinella-labs. See [LICENSE](LICENSE).

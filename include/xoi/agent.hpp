@@ -7,6 +7,7 @@
 #include <functional>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xoi {
@@ -21,6 +22,27 @@ class ToolRegistry {
 public:
   /// Registers a tool; returns an error string when registration is invalid.
   std::string add(ToolSpec spec, ToolHandler handler);
+  /// Registers a tool whose JSON input converts to a caller-defined C++ type.
+  /// The schema remains explicit and must agree with the JSON conversion.
+  template <typename Arguments>
+  std::string
+  add_typed(ToolSpec spec,
+            std::function<Result<std::string>(const Arguments &)> handler) {
+    if (!handler)
+      return "tool handler is empty";
+    return add(std::move(spec), [handler = std::move(handler)](
+                                    const nlohmann::json &input) {
+      try {
+        const Arguments arguments = input.get<Arguments>();
+        return handler(arguments);
+      } catch (const nlohmann::json::exception &error) {
+        return Result<std::string>(Error{
+            ErrorKind::Protocol,
+            std::string("tool arguments could not be decoded: ") + error.what(),
+            0, false});
+      }
+    });
+  }
   /// Returns the registered tool specifications in registration order.
   const std::vector<ToolSpec> &specs() const;
   /// Validates and executes a registered tool call.

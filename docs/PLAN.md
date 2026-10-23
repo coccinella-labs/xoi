@@ -26,10 +26,14 @@ licensed Apache-2.0. The SDK currently provides:
   API.
 - C++ request, response, message, and content-block types, including native
   `tool_use` and `tool_result` representations.
-- A host-supplied tool registry, basic JSON Schema required-field and
-  property-type checks, and a bounded synchronous agent loop.
+- A host-supplied tool registry with JSON and typed-input handlers, basic JSON
+  Schema required-field and property-type checks, and a bounded synchronous
+  agent loop. Typed handlers use nlohmann JSON conversions; schemas remain
+  explicitly declared by the application.
 - Retry/backoff for selected rate-limit, server, connection, and timeout
   failures; configurable request timeout and response-size limit.
+- Optional sampling parameters, custom API-key headers, OpenAI-compatible
+  completion-token field selection, and explicit libcurl proxy configuration.
 - Injectable transport interfaces, deterministic mock-transport tests,
   examples, and an installed CMake package.
 
@@ -40,14 +44,14 @@ complete coding-agent framework or a production-proven agentware integration.
 
 | Area | Status | What exists and what remains |
 |---|---|---|
-| C++ type guardrails | Partial | Public structs, enums, `std::variant` content blocks, and `Result<T>` provide compile-time structure. Tool arguments and results remain `nlohmann::json` and strings, so schemas do not infer strongly typed handler inputs. |
+| C++ type guardrails | Partial | Public structs, enums, `std::variant` content blocks, `Result<T>`, and typed tool handlers provide compile-time structure. Tool input types are selected by the host and decoded through nlohmann JSON; schemas are still explicit rather than generated from C++ types. |
 | Structured tool calling | Done | Anthropic, OpenAI-compatible, and Ollama adapters parse native tool calls and serialize tool results. The host supplies tools and decides what may execute. |
-| Tool schema validation | Partial | Required fields and declared JSON property types are checked. Full JSON Schema constraints, nested validation, schema-to-C++ type generation, and typed handler wrappers are not provided. |
+| Tool schema validation | Partial | Required fields and declared JSON property types are checked before handlers run. Typed handlers deserialize into host-defined C++ types and return decode failures as tool errors. Full JSON Schema constraints and schema-to-C++ generation remain unsupported. |
 | Provider support | Done | Anthropic Messages, generic OpenAI-compatible Chat Completions, and native Ollama chat have request/response tests. Provider-specific extensions outside these protocols are not implied. |
 | Streaming | Partial | Text deltas and completed tool calls are supported for SSE and Ollama NDJSON. The API is blocking/callback-based; there is no async task/future interface, cancellation of an active request, or uniform provider-specific streaming parity beyond tested formats. |
 | Retries and transport failures | Done | Selected 429/5xx and pre-response connection/timeout failures use bounded retries/backoff. Other failures are returned as typed errors. Retry behavior is tested with an injected transport. |
 | Timeouts and response limits | Done | Request timeout and maximum response bytes are configurable and passed to the transport. |
-| Proxy configuration | Partial | The libcurl transport can use ambient libcurl proxy behavior, but xoi has no explicit proxy configuration or documented/tested proxy contract. Agentware explicitly bypasses ambient proxies for loopback requests; integration must preserve that behavior. |
+| Proxy configuration | Done | `Config::proxy_url` and `XOI_PROXY_URL` explicitly override libcurl behavior; unset inherits its environment and an empty value disables proxy use. Adapters must set an empty override when preserving loopback proxy bypass. |
 | Offline/local models | Partial | Ollama is a local, no-key provider. xoi does not manage model installation, discovery, readiness, or offline guarantees for other providers. |
 | Coding-agent filesystem and shell tools | Missing in xoi | No built-in read/list/glob/grep/edit/write/run-command tools. A host can register its own handlers; xoi does not sandbox them or constrain paths. |
 | Verify-after-edit workflow | Missing in xoi | The SDK does not automatically run builds/tests after edits or feed diagnostics back to a model. |
@@ -67,12 +71,12 @@ textual JSON tool calls in its own bounded loop.
 
 | Agentware need | xoi support | Audit result |
 |---|---|---|
-| Together, Fireworks, Groq, DeepSeek, and OpenAI request/response protocol | Generic OpenAI-compatible Chat Completions with configurable base URL, bearer key, messages, tools, and max tokens | Partial: protocol fits, but agentware's `temperature` setting is not represented in `xoi::Request`; request/error/retry parity still needs tests. |
-| Cerebras endpoint, `X-API-Key`, completion-token field, `top_p`, and SSE response | Generic OpenAI-compatible API and SSE parsing | Partial: distinct auth and payload fields are not configurable; agentware currently buffers the SSE response before parsing it. Do not migrate on protocol similarity alone. |
-| Three Ollama model choices and local `/api/chat` | Native Ollama API, tool-call parsing, streaming and local no-key defaults | Partial for integration: model protocol exists, but preserve agentware's prompt, model selection, timeout/error behavior, and explicit loopback proxy bypass. |
+| Together, Fireworks, Groq, DeepSeek, and OpenAI request/response protocol | Generic OpenAI-compatible Chat Completions with configurable base URL, bearer key, messages, tools, max tokens, temperature, and top_p | Partial: protocol and request settings fit; request/error/retry parity and provider-specific behavior still need tests. |
+| Cerebras endpoint, `X-API-Key`, completion-token field, `top_p`, and SSE response | Generic OpenAI-compatible API and SSE parsing, custom API-key header, selectable completion-token field, and sampling parameters | Partial: request settings are representable, but provider/error/retry parity needs evidence; agentware currently buffers the SSE response before parsing it. |
+| Three Ollama model choices and local `/api/chat` | Native Ollama API, tool-call parsing, streaming, sampling parameters, explicit proxy override, and local no-key defaults | Partial for integration: preserve agentware's prompt, model selection, timeout/error behavior, and set an empty proxy override for loopback. |
 | Timeout and loop retry behavior | Configurable xoi request timeout and transport retries; typed timeout errors | Partial: disable xoi internal retries when exact behavior is needed, map typed errors to agentware observations, and test retry budgets end-to-end. |
 | HTTP status and malformed-response behavior | Typed HTTP, transport, protocol, callback, and size-limit errors | Partial: agentware exposes formatted strings and truncates HTTP error bodies; adapter mapping and user-visible parity are unproven. |
-| Proxy behavior | libcurl transport, without an xoi-specific proxy setting | Partial: agentware explicitly disables environment proxies for loopback URLs; an xoi-backed local request must retain this behavior. |
+| Proxy behavior | Explicit override through `Config::proxy_url` or `XOI_PROXY_URL` | Covered at the SDK configuration layer; agentware must explicitly disable proxies for loopback URLs and prove that behavior in its adapter tests. |
 | Response size | xoi default cap is 8 MiB and configurable; agentware model POST has no explicit body cap | Partial: adoption introduces a bound; agree on and test the intended cap. |
 | Streaming visible to the application | xoi callbacks deliver text deltas; agentware returns a completed string and has no token callback at this seam | Partial: no existing user-visible token streaming is lost for most modes, but introducing it is a separate behavior change. |
 | Native tool calls while preserving Agentware policy | xoi represents provider tool calls as typed blocks; agentware currently parses JSON text and applies canonicalization, consent, refusal, containment, and secret checks | Partial: use a separate flag and keep the host gate authoritative; do not call xoi `run_agent` with ungated handlers. |
@@ -126,17 +130,19 @@ Coding-agent quality also needs orchestration beyond a provider call:
    checks, secret filtering, and execution gate authoritative. Run the existing
    tool-loop goldens and compare observable behavior before considering a
    default change.
-4. **Improve typed tool definitions.** Evaluate a small C++ typed-handler and
-   schema-generation layer so one tool definition can validate JSON input and
-   give the handler a useful C++ type. Expand validation only with focused
-   tests and without forcing a schema framework on consumers.
-5. **Specify proxy and operational behavior.** Add explicit proxy configuration
-   only if real consumers need it; otherwise document libcurl environment
-   behavior. Test loopback bypass, timeout propagation, retry safety, response
-   limits, and transport errors at the installed-package boundary.
-6. **Clarify orchestration boundaries.** Add a concise example for
-   host-provided coding tools and a verify loop, while keeping filesystem,
-   process, sandbox, context compaction, and Git policy in the host.
+4. **Extend typed tools deliberately.** `ToolRegistry::add_typed` validates
+   against an explicit schema, decodes a caller-defined C++ input type, and
+   reports JSON decode failures as tool errors. A host-owned verification
+   example demonstrates the boundary without running commands. Automatic
+   schema generation and broader JSON Schema support remain open; add them only
+   with a clear design and focused tests.
+5. **Verify proxy and operational behavior.** Explicit proxy configuration is
+   available. Test loopback bypass, timeout propagation, retry safety, response
+   limits, and transport errors at the installed-package and consumer boundary.
+6. **Clarify orchestration boundaries.** Keep filesystem, process, sandbox,
+   context compaction, and Git policy in the host. Improve the example only
+   where it demonstrates a real host-owned integration without implying that
+   xoi provides those safety policies.
 7. **Defer async and broader platform scope until justified.** Callback
    streaming is available now. Add asynchronous/concurrent APIs only with a
    concrete consumer need and a clear cancellation and lifetime model.
