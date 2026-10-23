@@ -58,6 +58,8 @@ jobs:
           else
             bash scripts/check-commit-messages.sh "$BEFORE_SHA" "$HEAD_SHA"
           fi
+      - name: Test commit message checks
+        run: bash scripts/test-commit-message-checks.sh
 
   sanitizers:
     runs-on: ubuntu-latest

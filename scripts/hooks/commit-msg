@@ -4,6 +4,11 @@ set -euo pipefail
 message_file="${1:?commit message file is required}"
 IFS= read -r subject < "$message_file" || [[ -n "${subject:-}" ]]
 
+if ! awk 'NR > 1 { exit 1 } END { if (NR != 1) exit 1 }' "$message_file"; then
+  echo "error: commit message must contain only one non-empty subject line" >&2
+  exit 1
+fi
+
 if [[ ! "$subject" =~ ^.+\ \(#[0-9]+\)$ ]]; then
   echo "error: commit subject must end with an issue number, like (#14)" >&2
   exit 1

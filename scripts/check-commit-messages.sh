@@ -8,6 +8,7 @@ fi
 
 base_sha="$1"
 head_sha="$2"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$base_sha" =~ ^0+$ ]]; then
   commits="$(git rev-list "$head_sha")"
 else
@@ -19,20 +20,15 @@ if [[ -z "$commits" ]]; then
   exit 0
 fi
 
-while IFS= read -r commit; do
-  subject="$(git show -s --format=%s "$commit")"
-  message="$(git show -s --format=%B "$commit")"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
 
-  if [[ ! "$subject" =~ ^.+\ \(#[0-9]+\)$ ]]; then
-    echo "error: $commit has an invalid subject: $subject" >&2
-    exit 1
-  fi
-  if (( ${#subject} > 72 )); then
-    echo "error: $commit subject exceeds 72 characters" >&2
-    exit 1
-  fi
-  if [[ "$message" == *$'\xe2\x80\x94'* ]]; then
-    echo "error: $commit message contains an em dash" >&2
+while IFS= read -r commit; do
+  git cat-file commit "$commit" |
+    awk 'BEGIN { in_message = 0 } !in_message && /^$/ { in_message = 1; next } in_message { print }' \
+      > "$tmpdir/message"
+  if ! "$repo_root/scripts/hooks/commit-msg" "$tmpdir/message"; then
+    echo "error: invalid commit message in $commit" >&2
     exit 1
   fi
 done <<< "$commits"
