@@ -2,6 +2,7 @@
 #include <xoi/client.hpp>
 
 #include "../src/curl_body_callback.hpp"
+#include "../src/curl_option.hpp"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -282,6 +283,30 @@ TEST(CurlBodyCallbackTest, StopsBeforeAppendingBytesAboveLimit) {
   EXPECT_TRUE(state.too_large);
   EXPECT_FALSE(state.callback_failed);
   EXPECT_TRUE(state.body.empty());
+}
+
+TEST(CurlOptionTest, ReportsInvalidOptionInsteadOfIgnoringIt) {
+  CURL *handle = curl_easy_init();
+  ASSERT_NE(handle, nullptr);
+
+  const CURLcode code =
+      xoi::detail::checked_set_option(handle, static_cast<CURLoption>(-1), 0L);
+
+  EXPECT_NE(code, CURLE_OK);
+  curl_easy_cleanup(handle);
+}
+
+TEST(ClientTest, MapsCurlTransferFailureToTypedTransportError) {
+  auto config = test_config();
+  config.base_url = "not a valid URL";
+  config.max_retries = 0;
+  xoi::Client client(config);
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Transport);
+  EXPECT_EQ(result.error().transport_failure, xoi::TransportFailure::Other);
 }
 
 TEST(ClientTest, ConvertsToolResultsForOpenAICompatibleRequests) {

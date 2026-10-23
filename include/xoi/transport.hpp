@@ -7,6 +7,19 @@
 
 namespace xoi {
 
+/// Identifies a failure reported by the HTTP transport.
+enum class TransportFailure {
+  None,
+  Initialization,
+  HandleCreation,
+  HeaderAllocation,
+  OptionConfiguration,
+  Callback,
+  Connection,
+  Timeout,
+  Other,
+};
+
 /// An HTTP response or a transport-level failure.
 struct HttpResponse {
   int status = 0;
@@ -15,6 +28,7 @@ struct HttpResponse {
   std::string transport_error;
   bool response_too_large = false;
   bool response_callback_failed = false;
+  TransportFailure transport_failure = TransportFailure::None;
 
   /// Returns a response header value using case-insensitive name matching.
   std::string header(const std::string &name) const;

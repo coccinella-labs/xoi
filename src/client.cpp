@@ -344,7 +344,7 @@ Result<Response> Client::send(const Request &request) const {
     }
     if (!http.transport_error.empty()) {
       return Error{ErrorKind::Transport, http.transport_error, 0,
-                   transient_transport};
+                   transient_transport, http.transport_failure};
     }
     if (http.status < 200 || http.status >= 300) {
       return Error{ErrorKind::Http, error_message(http), http.status,

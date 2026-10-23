@@ -27,6 +27,7 @@ struct Error {
   std::string message;
   int status = 0;
   bool retryable = false;
+  TransportFailure transport_failure = TransportFailure::None;
 };
 
 /// Holds either a successful value or an SDK error.
