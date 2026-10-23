@@ -2,11 +2,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace xoi {
+
+/// Receives an arbitrary response chunk, valid only during the callback.
+using StreamChunkHandler = std::function<void(std::string_view)>;
 
 /// Identifies a failure reported by the HTTP transport.
 enum class TransportFailure : std::uint8_t {
@@ -46,6 +52,36 @@ public:
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
        int timeout_sec, std::size_t max_response_bytes) = 0;
+  /// Sends a POST and forwards successful response chunks as they arrive.
+  /// Transports that do not support incremental delivery may use this
+  /// compatibility implementation.
+  virtual HttpResponse
+  post_stream(const std::string &url, const std::string &body,
+              const std::vector<std::pair<std::string, std::string>> &headers,
+              int timeout_sec, std::size_t max_response_bytes,
+              const StreamChunkHandler &on_chunk) {
+    HttpResponse response =
+        post(url, body, headers, timeout_sec, max_response_bytes);
+    if (response.transport_error.empty() && response.status >= 200 &&
+        response.status < 300 && !response.response_too_large &&
+        !response.response_callback_failed) {
+      try {
+        on_chunk(response.body);
+        if (response.response_bytes_received == 0)
+          response.response_bytes_received = response.body.size();
+      } catch (const std::exception &error) {
+        response.response_callback_failed = true;
+        response.transport_failure = TransportFailure::Callback;
+        response.transport_error =
+            std::string("stream callback failed: ") + error.what();
+      } catch (...) {
+        response.response_callback_failed = true;
+        response.transport_failure = TransportFailure::Callback;
+        response.transport_error = "stream callback failed";
+      }
+    }
+    return response;
+  }
 };
 
 /// The default libcurl-backed HTTP transport.
@@ -56,6 +92,11 @@ public:
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
        int timeout_sec, std::size_t max_response_bytes) override;
+  HttpResponse
+  post_stream(const std::string &url, const std::string &body,
+              const std::vector<std::pair<std::string, std::string>> &headers,
+              int timeout_sec, std::size_t max_response_bytes,
+              const StreamChunkHandler &on_chunk) override;
 };
 
 } // namespace xoi
