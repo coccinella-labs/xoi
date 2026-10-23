@@ -601,6 +601,22 @@ TEST(ClientTest, SerializesOllamaSamplingParameters) {
   EXPECT_EQ(sent["options"]["top_p"], 0.8);
 }
 
+TEST(ClientTest, CanOmitOllamaPredictionLimitToUseProviderDefault) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200, R"({"message":{"content":"ok"}})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config(xoi::Provider::Ollama);
+  config.ollama_send_num_predict = false;
+  xoi::Client client(std::move(config), std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_FALSE(sent.contains("options"));
+  EXPECT_FALSE(sent["stream"].get<bool>());
+}
+
 TEST(ClientTest, SerializesOllamaToolResultsAsToolMessages) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,

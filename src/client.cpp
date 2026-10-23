@@ -221,7 +221,8 @@ openai_request_json(const Request &request, bool streaming,
   return body;
 }
 
-nlohmann::json ollama_request_json(const Request &request, bool streaming) {
+nlohmann::json ollama_request_json(const Request &request, bool streaming,
+                                   bool send_num_predict) {
   nlohmann::json messages = nlohmann::json::array();
   if (!request.system.empty())
     messages.push_back({{"role", "system"}, {"content", request.system}});
@@ -261,14 +262,16 @@ nlohmann::json ollama_request_json(const Request &request, bool streaming) {
     }
   }
 
-  nlohmann::json options{{"num_predict", request.max_tokens}};
+  nlohmann::json options = nlohmann::json::object();
+  if (send_num_predict)
+    options["num_predict"] = request.max_tokens;
   if (request.temperature)
     options["temperature"] = *request.temperature;
   if (request.top_p)
     options["top_p"] = *request.top_p;
-  nlohmann::json body{{"model", request.model},
-                      {"messages", messages},
-                      {"options", std::move(options)}};
+  nlohmann::json body{{"model", request.model}, {"messages", messages}};
+  if (!options.empty())
+    body["options"] = std::move(options);
   if (!request.tools.empty()) {
     body["tools"] = nlohmann::json::array();
     for (const auto &tool : request.tools) {
@@ -919,7 +922,8 @@ Result<Response> Client::send_impl(
       config_.provider == Provider::Anthropic
           ? anthropic_request_json(request, on_text_delta != nullptr)
       : config_.provider == Provider::Ollama
-          ? ollama_request_json(request, on_text_delta != nullptr)
+          ? ollama_request_json(request, on_text_delta != nullptr,
+                                config_.ollama_send_num_predict)
           : openai_request_json(request, on_text_delta != nullptr,
                                 config_.openai_token_limit_parameter);
   std::vector<std::pair<std::string, std::string>> headers{
