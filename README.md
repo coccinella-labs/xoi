@@ -33,6 +33,13 @@ override the endpoint.
 cmake -S . -B build && cmake --build build
 ```
 
+With Ollama running locally and a model available, try the streaming example:
+
+```sh
+./build/xoi_ollama_chat
+./build/xoi_ollama_chat qwen3:8b
+```
+
 Tool schema validation checks required fields and declared property types only.
 Tool handlers run in-process and are not sandboxed, so applications must
 isolate them.

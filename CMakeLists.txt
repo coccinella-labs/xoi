@@ -100,6 +100,10 @@ add_executable(xoi_chat examples/chat.cpp)
 target_link_libraries(xoi_chat PRIVATE xoi::xoi)
 xoi_enable_warnings(xoi_chat)
 
+add_executable(xoi_ollama_chat examples/ollama_chat.cpp)
+target_link_libraries(xoi_ollama_chat PRIVATE xoi::xoi)
+xoi_enable_warnings(xoi_ollama_chat)
+
 install(TARGETS xoi EXPORT xoiTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
