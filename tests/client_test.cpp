@@ -88,6 +88,14 @@ private:
   std::deque<xoi::HttpResponse> responses_;
 };
 
+struct VerificationArguments {
+  std::string target;
+};
+
+void from_json(const nlohmann::json &json, VerificationArguments &arguments) {
+  json.at("target").get_to(arguments.target);
+}
+
 xoi::Config test_config(xoi::Provider provider = xoi::Provider::Anthropic) {
   xoi::Config config;
   config.provider = provider;
@@ -1081,6 +1089,91 @@ TEST(AgentTest, ExecutesToolsAndSendsResultsBackToTheModel) {
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["type"], "tool_result");
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["content"],
             "contents of README.md");
+}
+
+TEST(ToolRegistryTest, DecodesTypedArgumentsAfterSchemaValidation) {
+  xoi::ToolRegistry tools;
+  bool handler_called = false;
+  EXPECT_TRUE(tools
+                  .add_typed<VerificationArguments>(
+                      {"verify",
+                       "Return verification output for a target",
+                       {{"type", "object"},
+                        {"properties", {{"target", {{"type", "string"}}}}},
+                        {"required", {"target"}}}},
+                      [&handler_called](const VerificationArguments &input)
+                          -> xoi::Result<std::string> {
+                        handler_called = true;
+                        return "verified " + input.target;
+                      })
+                  .empty());
+
+  const auto result =
+      tools.execute("verify", nlohmann::json{{"target", "tests"}});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result.value(), "verified tests");
+  EXPECT_TRUE(handler_called);
+  ASSERT_EQ(tools.specs().size(), 1U);
+  EXPECT_EQ(tools.specs()[0].input_schema["required"][0], "target");
+}
+
+TEST(ToolRegistryTest, ReturnsTypedDeserializationFailuresAsToolErrors) {
+  xoi::ToolRegistry tools;
+  bool handler_called = false;
+  EXPECT_TRUE(
+      tools
+          .add_typed<VerificationArguments>(
+              {"verify", "Return verification output", {{"type", "object"}}},
+              [&handler_called](
+                  const VerificationArguments &) -> xoi::Result<std::string> {
+                handler_called = true;
+                return std::string{"unexpected"};
+              })
+          .empty());
+
+  const auto result = tools.execute("verify", nlohmann::json{{"target", 42}});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_EQ(result.error().message.substr(
+                0, std::string("tool arguments could not be decoded").size()),
+            "tool arguments could not be decoded");
+  EXPECT_FALSE(handler_called);
+}
+
+TEST(AgentTest, ReturnsTypedDeserializationErrorsToTheModel) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"verify","input":{"target":42}}],"stop_reason":"tool_use"})",
+       {},
+       {}},
+      {200,
+       R"({"content":[{"type":"text","text":"The tool input was invalid."}]})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  EXPECT_TRUE(
+      tools
+          .add_typed<VerificationArguments>(
+              {"verify", "Return verification output", {{"type", "object"}}},
+              [](const VerificationArguments &) -> xoi::Result<std::string> {
+                return std::string{"unexpected"};
+              })
+          .empty());
+
+  const auto result = xoi::run_agent(client, test_request(), tools);
+
+  ASSERT_TRUE(result);
+  const auto follow_up = nlohmann::json::parse(observed->bodies[1]);
+  EXPECT_TRUE(follow_up["messages"][2]["content"][0]["is_error"].get<bool>());
+  EXPECT_EQ(
+      follow_up["messages"][2]["content"][0]["content"]
+          .get<std::string>()
+          .substr(0, std::string("tool arguments could not be decoded").size()),
+      "tool arguments could not be decoded");
 }
 
 TEST(AgentTest, CancelsBeforeMakingAProviderRequest) {
