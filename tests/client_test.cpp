@@ -3,11 +3,13 @@
 
 #include "../src/curl_body_callback.hpp"
 #include "../src/curl_option.hpp"
+#include "../src/environment.hpp"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <string>
@@ -69,6 +71,23 @@ xoi::Request test_request() {
   request.system = "Be concise.";
   request.messages = {{"user", {xoi::Text{"Hello"}}}};
   return request;
+}
+
+TEST(EnvironmentTest, ReadsConfiguredValue) {
+  constexpr char name[] = "XOI_TEST_ENVIRONMENT_VALUE";
+#ifdef _MSC_VER
+  ASSERT_EQ(_putenv_s(name, "configured"), 0);
+#else
+  ASSERT_EQ(setenv(name, "configured", 1), 0);
+#endif
+
+  EXPECT_EQ(xoi::detail::read_environment_variable(name), "configured");
+
+#ifdef _MSC_VER
+  EXPECT_EQ(_putenv_s(name, ""), 0);
+#else
+  EXPECT_EQ(unsetenv(name), 0);
+#endif
 }
 
 TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {

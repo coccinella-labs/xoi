@@ -1,12 +1,13 @@
 #include <xoi/client.hpp>
 
+#include "environment.hpp"
+
 #include <curl/curl.h>
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <ctime>
 #include <stdexcept>
 #include <thread>
@@ -15,11 +16,6 @@
 
 namespace xoi {
 namespace {
-
-std::string environment_value(const char *name) {
-  const char *value = std::getenv(name);
-  return value ? value : "";
-}
 
 std::string strip_trailing_slashes(std::string value) {
   while (!value.empty() && value.back() == '/')
@@ -239,17 +235,17 @@ Config Config::from_env(Provider provider) {
   Config config;
   config.provider = provider;
   if (provider == Provider::Anthropic) {
-    config.api_key = environment_value("XOI_API_KEY");
+    config.api_key = detail::read_environment_variable("XOI_API_KEY");
     if (config.api_key.empty())
-      config.api_key = environment_value("ANTHROPIC_API_KEY");
-    config.base_url = environment_value("XOI_BASE_URL");
+      config.api_key = detail::read_environment_variable("ANTHROPIC_API_KEY");
+    config.base_url = detail::read_environment_variable("XOI_BASE_URL");
     if (config.base_url.empty())
       config.base_url = "https://api.anthropic.com";
   } else {
-    config.api_key = environment_value("XOI_API_KEY");
+    config.api_key = detail::read_environment_variable("XOI_API_KEY");
     if (config.api_key.empty())
-      config.api_key = environment_value("OPENAI_API_KEY");
-    config.base_url = environment_value("XOI_BASE_URL");
+      config.api_key = detail::read_environment_variable("OPENAI_API_KEY");
+    config.base_url = detail::read_environment_variable("XOI_BASE_URL");
     if (config.base_url.empty())
       config.base_url = "https://api.openai.com/v1";
   }
