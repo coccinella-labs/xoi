@@ -69,8 +69,31 @@ Progress events include tool names, but not tool arguments or results.
 
 `ToolRegistry::add_typed<Arguments>` converts a tool's JSON input to a
 caller-defined C++ type using nlohmann JSON's `from_json` customization. The
-tool's JSON Schema is still declared explicitly and must agree with that
-conversion. Decode errors are returned as tool errors for the model to observe.
+existing overload accepts an explicit `ToolSpec`. An opt-in overload generates
+the root object schema from named `schema_field` member pointers:
+
+```cpp
+tools.add_typed<SearchArguments>(
+    "search", "Search the index",
+    [](const SearchArguments &args) -> xoi::Result<std::string> {
+      return search(args.query, args.limit);
+    },
+    xoi::schema_field("query", &SearchArguments::query),
+    xoi::schema_field("limit", &SearchArguments::limit));
+```
+
+Schema inference covers `std::string`, booleans, integral and floating-point
+values, `std::optional`, `std::vector`, and fixed `std::array` fields. Optional
+members are not required; fixed arrays emit equal `minItems` and `maxItems`.
+Generated object schemas reject unknown fields. Since C++20 cannot reflect
+ordinary member names or arbitrary `from_json` behavior, callers must name
+each field and use the schema override overload for custom, nested, or enum
+types. An override must match the member's JSON conversion. Unsupported
+inferred field types fail at compile time. `schema_field` only builds the
+schema; it does not generate a `from_json` conversion. The caller must provide
+a compatible conversion, including handling optional members. Decode errors
+are returned as tool errors for the model to observe.
+
 See `xoi_host_verification` for a host-owned tool example. It returns
 verification output supplied by the application; it does not run commands or
 provide sandboxing, authorization, or filesystem policy.

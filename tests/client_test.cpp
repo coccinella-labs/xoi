@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <deque>
 #include <limits>
@@ -94,6 +95,27 @@ struct VerificationArguments {
 
 void from_json(const nlohmann::json &json, VerificationArguments &arguments) {
   json.at("target").get_to(arguments.target);
+}
+
+struct SearchArguments {
+  std::string query;
+  std::optional<int> limit;
+  std::vector<std::string> tags;
+  std::array<int, 2> bounds;
+  std::string mode;
+  double threshold;
+  bool case_sensitive;
+};
+
+void from_json(const nlohmann::json &json, SearchArguments &arguments) {
+  json.at("query").get_to(arguments.query);
+  if (json.contains("limit"))
+    arguments.limit = json.at("limit").get<int>();
+  json.at("tags").get_to(arguments.tags);
+  json.at("bounds").get_to(arguments.bounds);
+  json.at("mode").get_to(arguments.mode);
+  json.at("threshold").get_to(arguments.threshold);
+  json.at("case_sensitive").get_to(arguments.case_sensitive);
 }
 
 xoi::Config test_config(xoi::Provider provider = xoi::Provider::Anthropic) {
@@ -1116,6 +1138,104 @@ TEST(ToolRegistryTest, DecodesTypedArgumentsAfterSchemaValidation) {
   EXPECT_TRUE(handler_called);
   ASSERT_EQ(tools.specs().size(), 1U);
   EXPECT_EQ(tools.specs()[0].input_schema["required"][0], "target");
+}
+
+TEST(ToolRegistryTest, InfersTypedFieldSchemasAndValidatesBeforeHandler) {
+  xoi::ToolRegistry tools;
+  int handler_calls = 0;
+  EXPECT_TRUE(
+      tools
+          .add_typed<SearchArguments>(
+              "search", "Search with typed arguments",
+              [&handler_calls](const SearchArguments &arguments)
+                  -> xoi::Result<std::string> {
+                ++handler_calls;
+                return arguments.query + ":" + arguments.mode;
+              },
+              xoi::schema_field("query", &SearchArguments::query),
+              xoi::schema_field("limit", &SearchArguments::limit),
+              xoi::schema_field("tags", &SearchArguments::tags),
+              xoi::schema_field("bounds", &SearchArguments::bounds),
+              xoi::schema_field(
+                  "mode", &SearchArguments::mode,
+                  {{"type", "string"}, {"enum", {"safe", "fast"}}}),
+              xoi::schema_field("threshold", &SearchArguments::threshold),
+              xoi::schema_field("case_sensitive",
+                                &SearchArguments::case_sensitive))
+          .empty());
+
+  ASSERT_EQ(tools.specs().size(), 1U);
+  const auto &schema = tools.specs()[0].input_schema;
+  EXPECT_EQ(schema["type"], "object");
+  EXPECT_EQ(schema["additionalProperties"], false);
+  EXPECT_EQ(schema["properties"]["query"],
+            (nlohmann::json{{"type", "string"}}));
+  EXPECT_EQ(schema["properties"]["limit"],
+            (nlohmann::json{{"type", "integer"}}));
+  EXPECT_EQ(schema["properties"]["tags"]["items"],
+            (nlohmann::json{{"type", "string"}}));
+  EXPECT_EQ(schema["properties"]["bounds"]["minItems"], 2);
+  EXPECT_EQ(schema["properties"]["bounds"]["maxItems"], 2);
+  EXPECT_EQ(schema["properties"]["mode"]["enum"],
+            nlohmann::json({"safe", "fast"}));
+  EXPECT_EQ(schema["properties"]["threshold"]["type"], "number");
+  EXPECT_EQ(schema["properties"]["case_sensitive"]["type"], "boolean");
+  EXPECT_EQ(schema["required"],
+            nlohmann::json({"query", "tags", "bounds", "mode", "threshold",
+                            "case_sensitive"}));
+
+  const auto valid = tools.execute("search", {{"query", "schema"},
+                                              {"tags", {"c++"}},
+                                              {"bounds", {1, 5}},
+                                              {"mode", "safe"},
+                                              {"threshold", 0.5},
+                                              {"case_sensitive", true}});
+  ASSERT_TRUE(valid);
+  EXPECT_EQ(valid.value(), "schema:safe");
+  const auto valid_with_optional =
+      tools.execute("search", {{"query", "schema"},
+                               {"limit", 10},
+                               {"tags", {"c++"}},
+                               {"bounds", {1, 5}},
+                               {"mode", "safe"},
+                               {"threshold", 0.5},
+                               {"case_sensitive", true}});
+  ASSERT_TRUE(valid_with_optional);
+
+  const auto invalid_enum = tools.execute("search", {{"query", "schema"},
+                                                     {"tags", {"c++"}},
+                                                     {"bounds", {1, 5}},
+                                                     {"mode", "unsafe"},
+                                                     {"threshold", 0.5},
+                                                     {"case_sensitive", true}});
+  ASSERT_FALSE(invalid_enum);
+  EXPECT_EQ(invalid_enum.error().message,
+            "argument 'mode' must be one of the declared enum values");
+
+  const auto unknown_field = tools.execute("search", {{"query", "schema"},
+                                                      {"tags", {"c++"}},
+                                                      {"bounds", {1, 5}},
+                                                      {"mode", "safe"},
+                                                      {"threshold", 0.5},
+                                                      {"case_sensitive", true},
+                                                      {"extra", true}});
+  ASSERT_FALSE(unknown_field);
+  EXPECT_EQ(unknown_field.error().message, "argument 'extra' is not allowed");
+  EXPECT_EQ(handler_calls, 2);
+}
+
+TEST(ToolRegistryTest, RejectsDuplicateTypedSchemaFieldNames) {
+  xoi::ToolRegistry tools;
+  const auto error = tools.add_typed<VerificationArguments>(
+      "verify", "Verify a target",
+      [](const VerificationArguments &) -> xoi::Result<std::string> {
+        return std::string{"verified"};
+      },
+      xoi::schema_field("target", &VerificationArguments::target),
+      xoi::schema_field("target", &VerificationArguments::target));
+
+  EXPECT_EQ(error, "tool schema field names must be unique");
+  EXPECT_TRUE(tools.specs().empty());
 }
 
 TEST(ToolRegistryTest, ReturnsTypedDeserializationFailuresAsToolErrors) {

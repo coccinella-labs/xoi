@@ -23,19 +23,17 @@ int main(int argc, char **argv) {
 
   xoi::ToolRegistry tools;
   const std::string registration_error = tools.add_typed<VerificationRequest>(
-      {"get_verification_output",
-       "Return output already collected by the host for build or tests.",
-       {{"type", "object"},
-        {"properties",
-         {{"target", {{"type", "string"}, {"enum", {"build", "tests"}}}}}},
-        {"required", {"target"}}}},
+      "get_verification_output",
+      "Return output already collected by the host for build or tests.",
       [&verification_output](
           const VerificationRequest &request) -> xoi::Result<std::string> {
         if (request.target != "build" && request.target != "tests")
           return xoi::Error{xoi::ErrorKind::Protocol,
                             "target must be 'build' or 'tests'", 0, false};
         return verification_output;
-      });
+      },
+      xoi::schema_field("target", &VerificationRequest::target,
+                        {{"type", "string"}, {"enum", {"build", "tests"}}}));
   if (!registration_error.empty()) {
     std::cerr << registration_error << '\n';
     return 1;
