@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,8 @@ struct HttpResponse {
   std::string body;
   std::vector<std::pair<std::string, std::string>> headers;
   std::string transport_error;
+  bool response_too_large = false;
+  bool response_callback_failed = false;
 
   /// Returns a response header value using case-insensitive name matching.
   std::string header(const std::string &name) const;
@@ -26,7 +29,7 @@ public:
   virtual HttpResponse
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
-       int timeout_sec) = 0;
+       int timeout_sec, std::size_t max_response_bytes) = 0;
 };
 
 /// The default libcurl-backed HTTP transport.
@@ -36,7 +39,7 @@ public:
   HttpResponse
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
-       int timeout_sec) override;
+       int timeout_sec, std::size_t max_response_bytes) override;
 };
 
 } // namespace xoi

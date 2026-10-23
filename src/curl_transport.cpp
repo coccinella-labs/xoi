@@ -1,5 +1,7 @@
 #include <xoi/transport.hpp>
 
+#include "curl_body_callback.hpp"
+
 #include <curl/curl.h>
 
 #include <algorithm>
@@ -30,12 +32,6 @@ struct HeaderList {
 void initialize_curl() {
   static std::once_flag once;
   std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
-
-size_t append_body(char *data, size_t size, size_t count, void *target) {
-  const size_t bytes = size * count;
-  static_cast<std::string *>(target)->append(data, bytes);
-  return bytes;
 }
 
 size_t append_header(char *data, size_t size, size_t count, void *target) {
@@ -81,7 +77,7 @@ std::string HttpResponse::header(const std::string &name) const {
 HttpResponse CurlTransport::post(
     const std::string &url, const std::string &body,
     const std::vector<std::pair<std::string, std::string>> &headers,
-    int timeout_sec) {
+    int timeout_sec, std::size_t max_response_bytes) {
   HttpResponse response;
   initialize_curl();
   CurlHandle handle;
@@ -102,6 +98,8 @@ HttpResponse CurlTransport::post(
     request_headers.value = appended;
   }
 
+  detail::BodyCallbackState body_state;
+  body_state.max_bytes = max_response_bytes;
   char error_buffer[CURL_ERROR_SIZE] = {};
   curl_easy_setopt(handle.value, CURLOPT_ERRORBUFFER, error_buffer);
   curl_easy_setopt(handle.value, CURLOPT_URL, url.c_str());
@@ -112,12 +110,15 @@ HttpResponse CurlTransport::post(
                    static_cast<curl_off_t>(body.size()));
   curl_easy_setopt(handle.value, CURLOPT_TIMEOUT,
                    static_cast<long>(std::max(timeout_sec, 1)));
-  curl_easy_setopt(handle.value, CURLOPT_WRITEFUNCTION, append_body);
-  curl_easy_setopt(handle.value, CURLOPT_WRITEDATA, &response.body);
+  curl_easy_setopt(handle.value, CURLOPT_WRITEFUNCTION, detail::append_body);
+  curl_easy_setopt(handle.value, CURLOPT_WRITEDATA, &body_state);
   curl_easy_setopt(handle.value, CURLOPT_HEADERFUNCTION, append_header);
   curl_easy_setopt(handle.value, CURLOPT_HEADERDATA, &response.headers);
 
   const CURLcode code = curl_easy_perform(handle.value);
+  response.body = std::move(body_state.body);
+  response.response_too_large = body_state.too_large;
+  response.response_callback_failed = body_state.callback_failed;
   if (code != CURLE_OK) {
     response.transport_error =
         error_buffer[0] ? error_buffer : curl_easy_strerror(code);

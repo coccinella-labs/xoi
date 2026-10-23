@@ -304,7 +304,16 @@ Result<Response> Client::send(const Request &request) const {
   const std::string serialized_body = body.dump();
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
     const HttpResponse http =
-        transport_->post(url, serialized_body, headers, config_.timeout_sec);
+        transport_->post(url, serialized_body, headers, config_.timeout_sec,
+                         config_.max_response_bytes);
+    if (http.response_too_large) {
+      return Error{ErrorKind::ResponseTooLarge,
+                   "response body exceeds configured size limit", 0, false};
+    }
+    if (http.response_callback_failed) {
+      return Error{ErrorKind::Transport, "response body callback failed", 0,
+                   false};
+    }
     if (http.body.size() > config_.max_response_bytes) {
       return Error{ErrorKind::ResponseTooLarge,
                    "response body exceeds configured size limit", 0, false};

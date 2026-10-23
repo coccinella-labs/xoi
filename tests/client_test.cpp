@@ -1,6 +1,8 @@
 #include <xoi/agent.hpp>
 #include <xoi/client.hpp>
 
+#include "../src/curl_body_callback.hpp"
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -21,11 +23,12 @@ public:
   xoi::HttpResponse
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
-       int timeout_sec) override {
+       int timeout_sec, std::size_t max_response_bytes) override {
     urls.push_back(url);
     bodies.push_back(body);
     request_headers.push_back(headers);
     timeouts.push_back(timeout_sec);
+    response_limits.push_back(max_response_bytes);
     if (responses_.empty())
       return {0, {}, {}, "mock response queue exhausted"};
     auto response = std::move(responses_.front());
@@ -41,6 +44,7 @@ public:
   std::vector<std::string> bodies;
   std::vector<std::vector<std::pair<std::string, std::string>>> request_headers;
   std::vector<int> timeouts;
+  std::vector<std::size_t> response_limits;
 
 private:
   std::deque<xoi::HttpResponse> responses_;
@@ -228,6 +232,7 @@ TEST(ClientTest, ReportsMalformedResponseAsProtocolError) {
 TEST(ClientTest, RejectsResponseBodyAboveConfiguredLimit) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200, R"({"content":[{"type":"text","text":"large"}]})", {}, {}}});
+  auto *observed = mock.get();
   auto config = test_config();
   config.max_response_bytes = 12;
   xoi::Client client(config, std::move(mock));
@@ -237,6 +242,8 @@ TEST(ClientTest, RejectsResponseBodyAboveConfiguredLimit) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::ResponseTooLarge);
   EXPECT_FALSE(result.error().retryable);
+  ASSERT_EQ(observed->response_limits.size(), 1U);
+  EXPECT_EQ(observed->response_limits[0], 12U);
 }
 
 TEST(ClientTest, RejectsZeroResponseBodyLimit) {
@@ -251,6 +258,30 @@ TEST(ClientTest, RejectsZeroResponseBodyLimit) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::Configuration);
   EXPECT_EQ(observed->calls(), 0U);
+}
+
+TEST(CurlBodyCallbackTest, ReturnsZeroAndMarksFailureWhenAppendThrows) {
+  xoi::detail::BodyCallbackState state;
+  state.max_bytes = 16;
+  state.append = [](std::string &, std::string_view) {
+    throw std::bad_alloc();
+  };
+  char chunk[] = "body";
+
+  EXPECT_EQ(xoi::detail::append_body(chunk, 1, 4, &state), 0U);
+  EXPECT_TRUE(state.callback_failed);
+  EXPECT_FALSE(state.too_large);
+}
+
+TEST(CurlBodyCallbackTest, StopsBeforeAppendingBytesAboveLimit) {
+  xoi::detail::BodyCallbackState state;
+  state.max_bytes = 3;
+  char chunk[] = "body";
+
+  EXPECT_EQ(xoi::detail::append_body(chunk, 1, 4, &state), 0U);
+  EXPECT_TRUE(state.too_large);
+  EXPECT_FALSE(state.callback_failed);
+  EXPECT_TRUE(state.body.empty());
 }
 
 TEST(ClientTest, ConvertsToolResultsForOpenAICompatibleRequests) {
