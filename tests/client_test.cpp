@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <deque>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -124,6 +126,39 @@ TEST(EnvironmentTest, ReadsConfiguredValue) {
 #endif
 }
 
+TEST(EnvironmentTest, ReadsProviderHeaderTokenParameterAndEmptyProxyOverride) {
+  const std::vector<std::string> names = {"XOI_API_KEY_HEADER",
+                                          "XOI_OPENAI_TOKEN_LIMIT_PARAMETER",
+                                          "XOI_PROXY_URL"};
+  std::vector<std::optional<std::string>> original_values;
+  for (const auto &name : names)
+    original_values.push_back(
+        xoi::detail::read_optional_environment_variable(name.c_str()));
+
+  auto set_environment = [](const std::string &name,
+                            const std::optional<std::string> &value) {
+#ifdef _MSC_VER
+    return _putenv_s(name.c_str(), value ? value->c_str() : "");
+#else
+    return value ? setenv(name.c_str(), value->c_str(), 1)
+                 : unsetenv(name.c_str());
+#endif
+  };
+  ASSERT_EQ(set_environment(names[0], "X-API-Key"), 0);
+  ASSERT_EQ(set_environment(names[1], "max_completion_tokens"), 0);
+  ASSERT_EQ(set_environment(names[2], ""), 0);
+
+  const auto config = xoi::Config::from_env(xoi::Provider::OpenAICompatible);
+
+  for (std::size_t i = 0; i < names.size(); ++i)
+    EXPECT_EQ(set_environment(names[i], original_values[i]), 0);
+  EXPECT_EQ(config.api_key_header, "X-API-Key");
+  EXPECT_EQ(config.openai_token_limit_parameter,
+            xoi::OpenAITokenLimitParameter::MaxCompletionTokens);
+  ASSERT_TRUE(config.proxy_url.has_value());
+  EXPECT_TRUE(config.proxy_url->empty());
+}
+
 TEST(EnvironmentTest, OllamaDefaultsToLocalWithoutCredentials) {
   const std::string original_key =
       xoi::detail::read_environment_variable("XOI_API_KEY");
@@ -182,6 +217,8 @@ TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {
   const auto sent = nlohmann::json::parse(observed->bodies[0]);
   EXPECT_EQ(sent["system"], "Be concise.");
   EXPECT_EQ(sent["messages"][0]["content"][0]["text"], "Hello");
+  EXPECT_FALSE(sent.contains("temperature"));
+  EXPECT_FALSE(sent.contains("top_p"));
   EXPECT_EQ(sent["tools"][0]["input_schema"]["required"][0], "path");
   EXPECT_FALSE(sent.contains("stream"));
   EXPECT_EQ(observed->timeouts[0], 60);
@@ -209,6 +246,23 @@ TEST(ClientTest, ParsesAnthropicToolUse) {
   EXPECT_EQ(tool.id, "call-1");
   EXPECT_EQ(tool.name, "read_file");
   EXPECT_EQ(tool.input["path"], "README.md");
+}
+
+TEST(ClientTest, SerializesAnthropicSamplingParameters) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200, R"({"content":[{"type":"text","text":"ok"}]})", {}, {}}});
+  auto *observed = mock.get();
+  auto request = test_request();
+  request.temperature = 0.7;
+  request.top_p = 0.9;
+  xoi::Client client(test_config(), std::move(mock));
+
+  const auto result = client.send(request);
+
+  ASSERT_TRUE(result);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["temperature"], 0.7);
+  EXPECT_EQ(sent["top_p"], 0.9);
 }
 
 TEST(ClientTest, RetriesRateLimitAndHonorsRetryAfterHeader) {
@@ -384,8 +438,67 @@ TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   EXPECT_EQ(sent["messages"][0]["role"], "system");
   EXPECT_EQ(sent["tools"][0]["function"]["name"], "list_dir");
   EXPECT_EQ(sent["tools"][0]["function"]["parameters"]["type"], "object");
+  EXPECT_EQ(sent["max_tokens"], request.max_tokens);
+  EXPECT_FALSE(sent.contains("max_completion_tokens"));
+  EXPECT_FALSE(sent.contains("temperature"));
+  EXPECT_FALSE(sent.contains("top_p"));
   EXPECT_EQ(observed->request_headers[0].back().first, "Authorization");
   EXPECT_EQ(observed->request_headers[0].back().second, "Bearer test-key");
+}
+
+TEST(ClientTest, SerializesOpenAIProviderOptionsAndCustomApiKeyHeader) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200, R"({"choices":[{"message":{"content":"ok"}}]})", {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config(xoi::Provider::OpenAICompatible);
+  config.api_key_header = "X-API-Key";
+  config.openai_token_limit_parameter =
+      xoi::OpenAITokenLimitParameter::MaxCompletionTokens;
+  auto request = test_request();
+  request.max_tokens = 4096;
+  request.temperature = 0.7;
+  request.top_p = 0.9;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(request);
+
+  ASSERT_TRUE(result);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["max_completion_tokens"], 4096);
+  EXPECT_FALSE(sent.contains("max_tokens"));
+  EXPECT_EQ(sent["temperature"], 0.7);
+  EXPECT_EQ(sent["top_p"], 0.9);
+  ASSERT_EQ(observed->request_headers[0].size(), 2U);
+  EXPECT_EQ(observed->request_headers[0][1].first, "X-API-Key");
+  EXPECT_EQ(observed->request_headers[0][1].second, "test-key");
+}
+
+TEST(ClientTest, RejectsUnsafeCustomApiKeyHeader) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  auto config = test_config(xoi::Provider::OpenAICompatible);
+  config.api_key_header = "X-API-Key\r\nInjected: yes";
+  xoi::Client client(config, std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Configuration);
+  EXPECT_EQ(observed->calls(), 0U);
+}
+
+TEST(ClientTest, RejectsNonFiniteSamplingParameters) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  auto request = test_request();
+  request.temperature = std::numeric_limits<double>::quiet_NaN();
+  xoi::Client client(test_config(), std::move(mock));
+
+  const auto result = client.send(request);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Configuration);
+  EXPECT_EQ(observed->calls(), 0U);
 }
 
 TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
@@ -422,6 +535,8 @@ TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
   EXPECT_EQ(sent["tools"][0]["function"]["name"], "read_file");
   EXPECT_EQ(sent["tools"][0]["function"]["parameters"]["required"][0], "path");
   EXPECT_EQ(sent["options"]["num_predict"], request.max_tokens);
+  EXPECT_FALSE(sent["options"].contains("temperature"));
+  EXPECT_FALSE(sent["options"].contains("top_p"));
   EXPECT_FALSE(sent["stream"].get<bool>());
   EXPECT_TRUE(observed->request_headers[0].empty() ||
               std::none_of(observed->request_headers[0].begin(),
@@ -429,6 +544,23 @@ TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
                            [](const auto &header) {
                              return header.first == "Authorization";
                            }));
+}
+
+TEST(ClientTest, SerializesOllamaSamplingParameters) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200, R"({"message":{"content":"ok"}})", {}, {}}});
+  auto *observed = mock.get();
+  auto request = test_request();
+  request.temperature = 0.2;
+  request.top_p = 0.8;
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+
+  const auto result = client.send(request);
+
+  ASSERT_TRUE(result);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["options"]["temperature"], 0.2);
+  EXPECT_EQ(sent["options"]["top_p"], 0.8);
 }
 
 TEST(ClientTest, SerializesOllamaToolResultsAsToolMessages) {

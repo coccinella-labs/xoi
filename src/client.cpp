@@ -5,8 +5,10 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <exception>
@@ -70,6 +72,33 @@ Error protocol_error(std::string message) {
   return {ErrorKind::Protocol, std::move(message), 0, false};
 }
 
+bool valid_header_name(const std::string &name) {
+  if (name.empty())
+    return false;
+  constexpr std::string_view punctuation = "!#$%&'*+-.^_`|~";
+  return std::all_of(name.begin(), name.end(), [&punctuation](unsigned char c) {
+    return c < 128 &&
+           (std::isalnum(c) != 0 ||
+            punctuation.find(static_cast<char>(c)) != std::string_view::npos);
+  });
+}
+
+bool contains_line_break(const std::string &value) {
+  return value.find_first_of("\r\n") != std::string::npos;
+}
+
+bool equal_ascii_case_insensitive(const std::string &left,
+                                  const std::string &right) {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(left[i])) !=
+        std::tolower(static_cast<unsigned char>(right[i])))
+      return false;
+  }
+  return true;
+}
+
 nlohmann::json anthropic_request_json(const Request &request, bool streaming) {
   nlohmann::json messages = nlohmann::json::array();
   for (const auto &message : request.messages) {
@@ -104,6 +133,10 @@ nlohmann::json anthropic_request_json(const Request &request, bool streaming) {
                       {"messages", messages}};
   if (!request.system.empty())
     body["system"] = request.system;
+  if (request.temperature)
+    body["temperature"] = *request.temperature;
+  if (request.top_p)
+    body["top_p"] = *request.top_p;
   if (!request.tools.empty()) {
     body["tools"] = nlohmann::json::array();
     for (const auto &tool : request.tools) {
@@ -117,7 +150,9 @@ nlohmann::json anthropic_request_json(const Request &request, bool streaming) {
   return body;
 }
 
-nlohmann::json openai_request_json(const Request &request, bool streaming) {
+nlohmann::json
+openai_request_json(const Request &request, bool streaming,
+                    OpenAITokenLimitParameter token_limit_parameter) {
   nlohmann::json messages = nlohmann::json::array();
   if (!request.system.empty())
     messages.push_back({{"role", "system"}, {"content", request.system}});
@@ -163,9 +198,14 @@ nlohmann::json openai_request_json(const Request &request, bool streaming) {
     }
   }
 
-  nlohmann::json body{{"model", request.model},
-                      {"max_tokens", request.max_tokens},
-                      {"messages", messages}};
+  nlohmann::json body{{"model", request.model}, {"messages", messages}};
+  body[token_limit_parameter == OpenAITokenLimitParameter::MaxTokens
+           ? "max_tokens"
+           : "max_completion_tokens"] = request.max_tokens;
+  if (request.temperature)
+    body["temperature"] = *request.temperature;
+  if (request.top_p)
+    body["top_p"] = *request.top_p;
   if (!request.tools.empty()) {
     body["tools"] = nlohmann::json::array();
     for (const auto &tool : request.tools) {
@@ -221,9 +261,14 @@ nlohmann::json ollama_request_json(const Request &request, bool streaming) {
     }
   }
 
+  nlohmann::json options{{"num_predict", request.max_tokens}};
+  if (request.temperature)
+    options["temperature"] = *request.temperature;
+  if (request.top_p)
+    options["top_p"] = *request.top_p;
   nlohmann::json body{{"model", request.model},
                       {"messages", messages},
-                      {"options", {{"num_predict", request.max_tokens}}}};
+                      {"options", std::move(options)}};
   if (!request.tools.empty()) {
     body["tools"] = nlohmann::json::array();
     for (const auto &tool : request.tools) {
@@ -786,13 +831,23 @@ Config Config::from_env(Provider provider) {
     if (config.base_url.empty())
       config.base_url = "https://api.openai.com/v1";
   }
+  config.api_key_header =
+      detail::read_environment_variable("XOI_API_KEY_HEADER");
+  config.proxy_url =
+      detail::read_optional_environment_variable("XOI_PROXY_URL");
+  if (detail::read_environment_variable("XOI_OPENAI_TOKEN_LIMIT_PARAMETER") ==
+      "max_completion_tokens") {
+    config.openai_token_limit_parameter =
+        OpenAITokenLimitParameter::MaxCompletionTokens;
+  }
   return config;
 }
 
 Client::Client(Config config, std::unique_ptr<Transport> transport)
     : config_(std::move(config)),
-      transport_(transport ? std::move(transport)
-                           : std::make_unique<CurlTransport>()) {}
+      transport_(transport
+                     ? std::move(transport)
+                     : std::make_unique<CurlTransport>(config_.proxy_url)) {}
 
 Result<Response> Client::send(const Request &request) const {
   return send_impl(request, nullptr);
@@ -824,6 +879,30 @@ Result<Response> Client::send_impl(
     return Error{ErrorKind::Configuration,
                  "model, positive max_tokens, and messages are required", 0,
                  false};
+  if ((request.temperature && !std::isfinite(*request.temperature)) ||
+      (request.top_p && !std::isfinite(*request.top_p)))
+    return Error{ErrorKind::Configuration,
+                 "temperature and top_p must be finite numbers", 0, false};
+  if (!config_.api_key_header.empty() &&
+      (!valid_header_name(config_.api_key_header) ||
+       equal_ascii_case_insensitive(config_.api_key_header, "Content-Type") ||
+       equal_ascii_case_insensitive(config_.api_key_header,
+                                    "Anthropic-Version")))
+    return Error{ErrorKind::Configuration, "invalid API key header name", 0,
+                 false};
+  if (!config_.api_key_header.empty() && config_.api_key.empty())
+    return Error{ErrorKind::Configuration,
+                 "custom API key header requires an API key", 0, false};
+  if (config_.provider == Provider::OpenAICompatible &&
+      config_.openai_token_limit_parameter !=
+          OpenAITokenLimitParameter::MaxTokens &&
+      config_.openai_token_limit_parameter !=
+          OpenAITokenLimitParameter::MaxCompletionTokens)
+    return Error{ErrorKind::Configuration,
+                 "invalid OpenAI-compatible token limit parameter", 0, false};
+  if (contains_line_break(config_.api_key))
+    return Error{ErrorKind::Configuration,
+                 "API key must not contain a line break", 0, false};
 
   for (const auto &message : request.messages) {
     if (message.role != "user" && message.role != "assistant")
@@ -841,19 +920,27 @@ Result<Response> Client::send_impl(
           ? anthropic_request_json(request, on_text_delta != nullptr)
       : config_.provider == Provider::Ollama
           ? ollama_request_json(request, on_text_delta != nullptr)
-          : openai_request_json(request, on_text_delta != nullptr);
+          : openai_request_json(request, on_text_delta != nullptr,
+                                config_.openai_token_limit_parameter);
   std::vector<std::pair<std::string, std::string>> headers{
       {"Content-Type", "application/json"}};
   if (on_text_delta)
     headers.emplace_back("Accept", config_.provider == Provider::Ollama
                                        ? "application/x-ndjson"
                                        : "text/event-stream");
+  if (!config_.api_key.empty()) {
+    if (!config_.api_key_header.empty()) {
+      headers.emplace_back(config_.api_key_header, config_.api_key);
+    } else if (config_.provider == Provider::Anthropic) {
+      headers.emplace_back("x-api-key", config_.api_key);
+    } else if (config_.provider == Provider::OpenAICompatible) {
+      headers.emplace_back("Authorization", "Bearer " + config_.api_key);
+    } else {
+      headers.emplace_back("Authorization", "Bearer " + config_.api_key);
+    }
+  }
   if (config_.provider == Provider::Anthropic) {
-    headers.emplace_back("x-api-key", config_.api_key);
     headers.emplace_back("anthropic-version", "2023-06-01");
-  } else if (config_.provider == Provider::OpenAICompatible ||
-             !config_.api_key.empty()) {
-    headers.emplace_back("Authorization", "Bearer " + config_.api_key);
   }
 
   const std::string url = endpoint(config_);
