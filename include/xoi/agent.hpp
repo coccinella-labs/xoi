@@ -12,7 +12,9 @@ namespace xoi {
 /// Executes a tool input and returns its text result or an error.
 using ToolHandler = std::function<Result<std::string>(const nlohmann::json &)>;
 
-/// Stores tool specifications and their local handlers.
+/// Stores tool specifications and in-process handlers. Schema validation is
+/// basic and checks required fields and declared property types only. Handlers
+/// are not sandboxed; the application is responsible for isolating them.
 class ToolRegistry {
 public:
   /// Registers a tool; returns an error string when registration is invalid.

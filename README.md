@@ -15,3 +15,7 @@ auto response = client.send(request);
 Build: `cmake -S . -B build && cmake --build build`
 
 TODO: Choose MIT or Apache-2.0 before the first release.
+
+Tool schema validation is basic and checks required fields and declared
+property types only. Tool handlers run in-process and are not sandboxed; the
+application is responsible for isolating them.
