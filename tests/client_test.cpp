@@ -1251,6 +1251,75 @@ TEST(ToolRegistryTest, RejectsInvalidArrayItemsAndEnumValues) {
   EXPECT_FALSE(handler_called);
 }
 
+TEST(ToolRegistryTest, ValidatesNumericStringAndArrayBoundsRecursively) {
+  xoi::ToolRegistry tools;
+  int handler_calls = 0;
+  const nlohmann::json schema = {
+      {"type", "object"},
+      {"properties",
+       {{"name", {{"type", "string"}, {"minLength", 2}, {"maxLength", 3}}},
+        {"count", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}},
+        {"ratio", {{"type", "number"}, {"minimum", 1.5}, {"maximum", 2.5}}},
+        {"tags",
+         {{"type", "array"},
+          {"minItems", 1},
+          {"maxItems", 2},
+          {"items",
+           {{"type", "string"}, {"minLength", 2}, {"maxLength", 3}}}}}}}};
+  EXPECT_TRUE(tools
+                  .add({"bounded", "Validate bounded values", schema},
+                       [&handler_calls](
+                           const nlohmann::json &) -> xoi::Result<std::string> {
+                         ++handler_calls;
+                         return std::string{"accepted"};
+                       })
+                  .empty());
+
+  const auto minimums = tools.execute(
+      "bounded",
+      {{"name", "猫a"}, {"count", 1}, {"ratio", 1.5}, {"tags", {"ok"}}});
+  ASSERT_TRUE(minimums);
+  EXPECT_EQ(minimums.value(), "accepted");
+  const auto maximums = tools.execute("bounded", {{"name", "abc"},
+                                                  {"count", 5},
+                                                  {"ratio", 2.5},
+                                                  {"tags", {"one", "two"}}});
+  ASSERT_TRUE(maximums);
+  EXPECT_EQ(maximums.value(), "accepted");
+
+  const std::vector<std::pair<nlohmann::json, std::string>> invalid_inputs = {
+      {{{"name", "猫"}, {"count", 1}, {"ratio", 2.0}, {"tags", {"one"}}},
+       "argument 'name' must have at least 2 characters"},
+      {{{"name", "abcd"}, {"count", 1}, {"ratio", 2.0}, {"tags", {"one"}}},
+       "argument 'name' must have at most 3 characters"},
+      {{{"name", "ab"}, {"count", 0}, {"ratio", 2.0}, {"tags", {"one"}}},
+       "argument 'count' must be >= 1"},
+      {{{"name", "ab"}, {"count", 6}, {"ratio", 2.0}, {"tags", {"one"}}},
+       "argument 'count' must be <= 5"},
+      {{{"name", "ab"},
+        {"count", 1},
+        {"ratio", 2.0},
+        {"tags", nlohmann::json::array()}},
+       "argument 'tags' must contain at least 1 items"},
+      {{{"name", "ab"},
+        {"count", 1},
+        {"ratio", 2.0},
+        {"tags", {"one", "two", "three"}}},
+       "argument 'tags' must contain at most 2 items"},
+      {{{"name", "ab"}, {"count", 1}, {"ratio", 1.4}, {"tags", {"one"}}},
+       "argument 'ratio' must be >= 1.5"},
+      {{{"name", "ab"}, {"count", 1}, {"ratio", 2.6}, {"tags", {"one"}}},
+       "argument 'ratio' must be <= 2.5"},
+      {{{"name", "ab"}, {"count", 1}, {"ratio", 2.0}, {"tags", {"x"}}},
+       "argument 'tags[0]' must have at least 2 characters"}};
+  for (const auto &[input, error] : invalid_inputs) {
+    const auto result = tools.execute("bounded", input);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().message, error);
+  }
+  EXPECT_EQ(handler_calls, 2);
+}
+
 TEST(ToolRegistryTest, RejectsMalformedOrUnsupportedSchemaKeywords) {
   xoi::ToolRegistry tools;
   const auto handler = [](const nlohmann::json &) {
@@ -1275,6 +1344,21 @@ TEST(ToolRegistryTest, RejectsMalformedOrUnsupportedSchemaKeywords) {
                        {{"type", "object"}, {"additionalProperties", "no"}}},
                       handler),
             "tool input schema additionalProperties must be a boolean");
+  EXPECT_EQ(tools.add({"bad_minimum",
+                       "Bad minimum",
+                       {{"type", "number"}, {"minimum", "1"}}},
+                      handler),
+            "tool input schema minimum must be a finite number");
+  EXPECT_EQ(tools.add({"bad_max_length",
+                       "Bad maximum length",
+                       {{"type", "string"}, {"maxLength", -1}}},
+                      handler),
+            "tool input schema maxLength must be a non-negative integer");
+  EXPECT_EQ(tools.add({"bad_min_items",
+                       "Bad minimum items",
+                       {{"type", "array"}, {"minItems", 1.5}}},
+                      handler),
+            "tool input schema minItems must be a non-negative integer");
   EXPECT_EQ(tools.add({"ignored_constraint",
                        "Ignored constraint",
                        {{"type", "object"}, {"minProperties", 1}}},

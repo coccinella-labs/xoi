@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -35,12 +37,24 @@ bool matches_type(std::string_view type, const nlohmann::json &value) {
 }
 
 bool supported_schema_keyword(std::string_view keyword) {
-  constexpr std::array<std::string_view, 12> keywords = {
+  constexpr std::array<std::string_view, 18> keywords = {
       "type",        "properties", "required",
       "items",       "enum",       "additionalProperties",
+      "minimum",     "maximum",    "minLength",
+      "maxLength",   "minItems",   "maxItems",
       "description", "title",      "default",
       "examples",    "$schema",    "$comment"};
   return std::find(keywords.begin(), keywords.end(), keyword) != keywords.end();
+}
+
+bool is_finite_number(const nlohmann::json &value) {
+  return value.is_number() &&
+         (!value.is_number_float() || std::isfinite(value.get<double>()));
+}
+
+bool is_nonnegative_integer(const nlohmann::json &value) {
+  return value.is_number_unsigned() ||
+         (value.is_number_integer() && value.get<std::int64_t>() >= 0);
 }
 
 std::string validate_schema_definition(const nlohmann::json &schema,
@@ -87,6 +101,16 @@ std::string validate_schema_definition(const nlohmann::json &schema,
   if (schema.contains("additionalProperties") &&
       !schema["additionalProperties"].is_boolean())
     return path + " additionalProperties must be a boolean";
+  for (const std::string_view bound : {"minimum", "maximum"}) {
+    if (schema.contains(bound) && !is_finite_number(schema[bound]))
+      return path + " " + std::string(bound) + " must be a finite number";
+  }
+  for (const std::string_view bound :
+       {"minLength", "maxLength", "minItems", "maxItems"}) {
+    if (schema.contains(bound) && !is_nonnegative_integer(schema[bound]))
+      return path + " " + std::string(bound) +
+             " must be a non-negative integer";
+  }
   for (const std::string_view annotation :
        {"description", "title", "$schema", "$comment"}) {
     if (schema.contains(annotation) && !schema[annotation].is_string())
@@ -101,6 +125,13 @@ std::string argument_path(const std::string &parent, const std::string &name) {
   return parent.empty() ? name : parent + "." + name;
 }
 
+std::size_t utf8_code_point_count(std::string_view value) {
+  return static_cast<std::size_t>(
+      std::count_if(value.begin(), value.end(), [](char byte) {
+        return (static_cast<unsigned char>(byte) & 0xC0U) != 0x80U;
+      }));
+}
+
 std::string validate_value(const nlohmann::json &schema,
                            const nlohmann::json &value,
                            const std::string &path) {
@@ -113,6 +144,41 @@ std::string validate_value(const nlohmann::json &schema,
     const auto &values = schema["enum"];
     if (std::find(values.begin(), values.end(), value) == values.end())
       return "argument '" + path + "' must be one of the declared enum values";
+  }
+  for (const std::string_view bound : {"minimum", "maximum"}) {
+    if (value.is_number() && schema.contains(bound)) {
+      const auto &limit = schema[bound];
+      if ((bound == "minimum" && value < limit) ||
+          (bound == "maximum" && value > limit))
+        return "argument '" + path + "' must be " +
+               (bound == "minimum" ? ">= " : "<= ") + limit.dump();
+    }
+  }
+  if (value.is_string()) {
+    const std::size_t length =
+        utf8_code_point_count(value.get_ref<const std::string &>());
+    for (const std::string_view bound : {"minLength", "maxLength"}) {
+      if (schema.contains(bound)) {
+        const auto limit = schema[bound].get<std::uint64_t>();
+        if ((bound == "minLength" && length < limit) ||
+            (bound == "maxLength" && length > limit))
+          return "argument '" + path + "' must have " +
+                 (bound == "minLength" ? "at least " : "at most ") +
+                 std::to_string(limit) + " characters";
+      }
+    }
+  }
+  if (value.is_array()) {
+    for (const std::string_view bound : {"minItems", "maxItems"}) {
+      if (schema.contains(bound)) {
+        const auto limit = schema[bound].get<std::uint64_t>();
+        if ((bound == "minItems" && value.size() < limit) ||
+            (bound == "maxItems" && value.size() > limit))
+          return "argument '" + path + "' must contain " +
+                 (bound == "minItems" ? "at least " : "at most ") +
+                 std::to_string(limit) + " items";
+      }
+    }
   }
   if (value.is_array() && schema.contains("items")) {
     for (std::size_t index = 0; index < value.size(); ++index) {
