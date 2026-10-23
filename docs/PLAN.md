@@ -16,8 +16,8 @@ results, deterministic tests, and clear examples.
 ## Current state
 
 The `v0.1.0` release is published from main commit
-`a3675b8c1ed6a77825bc4bb406ba40efdfb9d84b`. The repository is private and
-licensed Apache-2.0. The SDK currently provides:
+`a3675b8c1ed6a77825bc4bb406ba40efdfb9d84b`. The repository is public as of
+2026-10-24 and licensed Apache-2.0. The SDK currently provides:
 
 - Blocking request/response calls for Anthropic Messages, OpenAI-compatible
   Chat Completions, and native Ollama `/api/chat`.
@@ -182,15 +182,14 @@ is the required sequence:
 
 If an adoption blocker belongs in xoi, track and implement it in xoi first,
 with its own tests and release. Agentware must consume xoi as an external
-dependency; do not copy source between repositories. Because xoi is private,
-stop rather than adding a token, deploy key, or other private-fetch secret to
-agentware CI. Resolve package distribution/access before requiring CI to build
-the optional integration. Pin any consumed artifact to the exact SDK commit
-and prove that both the default-off build and opt-in build use the intended
-revision. The agentware build already uses nlohmann JSON and CPR/libcurl; xoi
-also uses nlohmann JSON and libcurl, so the main build cost is compiling and
-linking xoi and resolving its CMake package, not introducing an unrelated
-network stack. Keep that dependency opt-in so agentware's offline-first
+dependency; do not copy source between repositories. xoi is public, so
+Agentware CI can fetch a pinned revision without credentials. Never add a
+token, deploy key, or other private-fetch secret to Agentware CI. Pin any
+consumed artifact to the exact SDK commit and prove that both the default-off
+build and opt-in build use the intended revision. The Agentware build already
+uses nlohmann JSON and CPR/libcurl; xoi also uses nlohmann JSON and libcurl, so
+the main build cost is compiling and linking xoi, not introducing an unrelated
+network stack. Keep that dependency opt-in so Agentware's offline-first
 default remains unchanged.
 
 ## Boundaries

@@ -85,6 +85,8 @@ struct Config {
   std::optional<std::string> proxy_url;
   OpenAITokenLimitParameter openai_token_limit_parameter =
       OpenAITokenLimitParameter::MaxTokens;
+  /// Send num_predict from max_tokens; false leaves the limit to Ollama.
+  bool ollama_send_num_predict = true;
   int timeout_sec = 60;
   std::size_t max_response_bytes = std::size_t{8} * 1024U * 1024U;
   int max_retries = 3;

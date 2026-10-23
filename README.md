@@ -33,7 +33,9 @@ raw key in a custom header, such as `X-API-Key`.
 `XOI_PROXY_URL` explicitly overrides libcurl's proxy environment. An unset
 value leaves libcurl's defaults in effect; an empty value disables proxy use.
 Requests can set optional `temperature` and `top_p` sampling values in
-`xoi::Request`.
+`xoi::Request`. Ollama includes `options.num_predict` by default; set
+`Config::ollama_send_num_predict` to `false` to let the server choose its
+default prediction limit.
 
 ## Build
 
