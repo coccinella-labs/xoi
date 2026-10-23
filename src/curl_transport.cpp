@@ -157,7 +157,7 @@ HttpResponse CurlTransport::post(
       !set_option(CURLOPT_POSTFIELDSIZE_LARGE, "POSTFIELDSIZE_LARGE",
                   static_cast<curl_off_t>(body.size())) ||
       !set_option(CURLOPT_TIMEOUT, "TIMEOUT",
-                  static_cast<long>(std::max(timeout_sec, 1))) ||
+                  static_cast<long>((std::max)(timeout_sec, 1))) ||
       !set_option(CURLOPT_WRITEFUNCTION, "WRITEFUNCTION",
                   detail::append_body) ||
       !set_option(CURLOPT_WRITEDATA, "WRITEDATA", &body_state) ||
@@ -193,8 +193,9 @@ HttpResponse CurlTransport::post(
         curl_easy_strerror(info_code);
     return response;
   }
-  response.status = static_cast<int>(std::clamp(
-      status_code, 0L, static_cast<long>(std::numeric_limits<int>::max())));
+  response.status = static_cast<int>(
+      (std::clamp)(status_code, 0L,
+                   static_cast<long>((std::numeric_limits<int>::max)())));
   return response;
 }
 

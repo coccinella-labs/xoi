@@ -63,6 +63,9 @@ target_link_libraries(xoi
   PRIVATE
     CURL::libcurl
 )
+if(WIN32)
+  target_compile_definitions(xoi PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 xoi_enable_warnings(xoi)
 
 if(BUILD_TESTING)
@@ -80,6 +83,9 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
+  if(WIN32)
+    target_compile_definitions(xoi_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
   target_link_libraries(xoi_tests PRIVATE xoi::xoi GTest::gtest_main)
   xoi_enable_warnings(xoi_tests)
   include(GoogleTest)
