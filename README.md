@@ -37,4 +37,6 @@ isolate them.
 Messages and OpenAI-compatible APIs. It delivers text deltas to a callback and
 returns any completed tool calls with the final response.
 
-The license decision is pending authorization; see issue #17.
+## License
+
+Apache-2.0. Copyright (c) 2026 coccinella-labs. See [LICENSE](LICENSE).
