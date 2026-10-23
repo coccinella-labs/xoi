@@ -3,6 +3,7 @@
 #include <xoi/client.hpp>
 #include <xoi/types.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <stop_token>
 #include <string>
@@ -36,7 +37,7 @@ private:
 };
 
 /// Identifies a lifecycle event emitted during an agent run.
-enum class AgentEventKind {
+enum class AgentEventKind : std::uint8_t {
   ModelRequestStarted,
   ModelResponseReceived,
   ToolExecutionStarted,
