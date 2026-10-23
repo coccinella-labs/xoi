@@ -27,7 +27,8 @@ inline std::size_t append_body(char *data, std::size_t size, std::size_t count,
     return 0;
   }
   const std::size_t bytes = size * count;
-  if (bytes > state.max_bytes - std::min(state.body.size(), state.max_bytes)) {
+  if (bytes >
+      state.max_bytes - (std::min)(state.body.size(), state.max_bytes)) {
     state.too_large = true;
     return 0;
   }

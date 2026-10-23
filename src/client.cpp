@@ -54,12 +54,12 @@ long retry_after_seconds(const HttpResponse &response) {
   const auto [end, error] =
       std::from_chars(value.data(), value.data() + value.size(), seconds);
   if (error == std::errc{} && end == value.data() + value.size())
-    return std::max(seconds, 0L);
+    return (std::max)(seconds, 0L);
 
   const time_t retry_at = curl_getdate(value.c_str(), nullptr);
   if (retry_at < 0)
     return -1;
-  return std::max(static_cast<long>(retry_at - std::time(nullptr)), 0L);
+  return (std::max)(static_cast<long>(retry_at - std::time(nullptr)), 0L);
 }
 
 Error protocol_error(std::string message) {
@@ -329,15 +329,15 @@ Result<Response> Client::send(const Request &request) const {
       const long retry_after = retry_after_seconds(http);
       int64_t wait_ms = 0;
       if (retry_after >= 0) {
-        wait_ms = std::min(static_cast<int64_t>(retry_after),
-                           static_cast<int64_t>(config_.max_backoff_sec)) *
+        wait_ms = (std::min)(static_cast<int64_t>(retry_after),
+                             static_cast<int64_t>(config_.max_backoff_sec)) *
                   1000;
       } else {
         const int64_t exponential_ms =
             static_cast<int64_t>(config_.initial_backoff_ms) *
             static_cast<int64_t>(uint64_t{1} << static_cast<unsigned int>(
-                                     std::min(attempt, 20)));
-        wait_ms = std::min(exponential_ms, max_wait_ms);
+                                     (std::min)(attempt, 20)));
+        wait_ms = (std::min)(exponential_ms, max_wait_ms);
       }
       if (wait_ms > 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
