@@ -396,8 +396,10 @@ TEST(CurlOptionTest, ReportsInvalidOptionInsteadOfIgnoringIt) {
   CURL *handle = curl_easy_init();
   ASSERT_NE(handle, nullptr);
 
+  constexpr auto unknown_option =
+      static_cast<CURLoption>(CURLOPTTYPE_LONG + 9999);
   const CURLcode code =
-      xoi::detail::checked_set_option(handle, static_cast<CURLoption>(-1), 0L);
+      xoi::detail::checked_set_option(handle, unknown_option, 0L);
 
   EXPECT_NE(code, CURLE_OK);
   curl_easy_cleanup(handle);
