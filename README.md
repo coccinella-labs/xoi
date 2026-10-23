@@ -49,11 +49,13 @@ With Ollama running locally and a model available, try the streaming example:
 ```
 
 Tool schema validation supports `type`, `properties`, `required`, `items`,
-`enum`, and boolean `additionalProperties`. Object properties and array items
-are validated recursively. Unsupported schema keywords are rejected when a
-tool is registered instead of being silently ignored; this is a limited subset,
-not a full JSON Schema implementation. Tool handlers run in-process and are not
-sandboxed, so applications must isolate them.
+`enum`, boolean `additionalProperties`, numeric `minimum`/`maximum`, string
+`minLength`/`maxLength`, and array `minItems`/`maxItems`. Object properties and
+array items are validated recursively. String lengths count UTF-8 code points.
+Unsupported schema keywords are rejected when a tool is registered instead
+of being silently ignored; this is a limited subset, not a full JSON Schema
+implementation. Tool handlers run in-process and are not sandboxed, so
+applications must isolate them.
 
 `Client::send_stream` supports server-sent event responses from Anthropic
 Messages and OpenAI-compatible APIs, and newline-delimited JSON from Ollama.

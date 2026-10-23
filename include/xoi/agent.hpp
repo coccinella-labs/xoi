@@ -16,8 +16,9 @@ namespace xoi {
 using ToolHandler = std::function<Result<std::string>(const nlohmann::json &)>;
 
 /// Stores tool specifications and in-process handlers. Schema validation
-/// supports a documented subset of JSON Schema. Handlers are not sandboxed;
-/// the application is responsible for isolating them.
+/// supports a documented JSON Schema subset, including recursive types,
+/// numeric bounds, and string/array lengths. Handlers are not sandboxed; the
+/// application is responsible for isolating them.
 class ToolRegistry {
 public:
   /// Registers a tool; returns an error string when registration is invalid.
