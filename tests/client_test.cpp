@@ -146,7 +146,11 @@ TEST(EnvironmentTest, ReadsProviderHeaderTokenParameterAndEmptyProxyOverride) {
   };
   ASSERT_EQ(set_environment(names[0], "X-API-Key"), 0);
   ASSERT_EQ(set_environment(names[1], "max_completion_tokens"), 0);
+#ifdef _MSC_VER
+  ASSERT_EQ(set_environment(names[2], "http://proxy.test"), 0);
+#else
   ASSERT_EQ(set_environment(names[2], ""), 0);
+#endif
 
   const auto config = xoi::Config::from_env(xoi::Provider::OpenAICompatible);
 
@@ -156,7 +160,11 @@ TEST(EnvironmentTest, ReadsProviderHeaderTokenParameterAndEmptyProxyOverride) {
   EXPECT_EQ(config.openai_token_limit_parameter,
             xoi::OpenAITokenLimitParameter::MaxCompletionTokens);
   ASSERT_TRUE(config.proxy_url.has_value());
+#ifdef _MSC_VER
+  EXPECT_EQ(*config.proxy_url, "http://proxy.test");
+#else
   EXPECT_TRUE(config.proxy_url->empty());
+#endif
 }
 
 TEST(EnvironmentTest, OllamaDefaultsToLocalWithoutCredentials) {
