@@ -88,10 +88,11 @@ private:
 xoi::Config test_config(xoi::Provider provider = xoi::Provider::Anthropic) {
   xoi::Config config;
   config.provider = provider;
-  config.api_key = "test-key";
-  config.base_url = provider == xoi::Provider::Anthropic
-                        ? "https://anthropic.test"
-                        : "https://openai.test/v1/";
+  config.api_key = provider == xoi::Provider::Ollama ? "" : "test-key";
+  config.base_url =
+      provider == xoi::Provider::Anthropic ? "https://anthropic.test"
+      : provider == xoi::Provider::Ollama  ? "http://localhost:11434/"
+                                           : "https://openai.test/v1/";
   config.initial_backoff_ms = 0;
   config.max_backoff_sec = 0;
   return config;
@@ -120,6 +121,38 @@ TEST(EnvironmentTest, ReadsConfiguredValue) {
 #else
   EXPECT_EQ(unsetenv(name), 0);
 #endif
+}
+
+TEST(EnvironmentTest, OllamaDefaultsToLocalWithoutCredentials) {
+  const std::string original_key =
+      xoi::detail::read_environment_variable("XOI_API_KEY");
+  const std::string original_url =
+      xoi::detail::read_environment_variable("XOI_BASE_URL");
+#ifdef _MSC_VER
+  ASSERT_EQ(_putenv_s("XOI_API_KEY", ""), 0);
+  ASSERT_EQ(_putenv_s("XOI_BASE_URL", ""), 0);
+#else
+  ASSERT_EQ(setenv("XOI_API_KEY", "", 1), 0);
+  ASSERT_EQ(setenv("XOI_BASE_URL", "", 1), 0);
+#endif
+
+  const auto config = xoi::Config::from_env(xoi::Provider::Ollama);
+
+#ifdef _MSC_VER
+  EXPECT_EQ(_putenv_s("XOI_API_KEY", original_key.c_str()), 0);
+  EXPECT_EQ(_putenv_s("XOI_BASE_URL", original_url.c_str()), 0);
+#else
+  if (original_key.empty())
+    EXPECT_EQ(unsetenv("XOI_API_KEY"), 0);
+  else
+    EXPECT_EQ(setenv("XOI_API_KEY", original_key.c_str(), 1), 0);
+  if (original_url.empty())
+    EXPECT_EQ(unsetenv("XOI_BASE_URL"), 0);
+  else
+    EXPECT_EQ(setenv("XOI_BASE_URL", original_url.c_str(), 1), 0);
+#endif
+  EXPECT_TRUE(config.api_key.empty());
+  EXPECT_EQ(config.base_url, "http://localhost:11434");
 }
 
 TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {
@@ -352,6 +385,163 @@ TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   EXPECT_EQ(sent["tools"][0]["function"]["parameters"]["type"], "object");
   EXPECT_EQ(observed->request_headers[0].back().first, "Authorization");
   EXPECT_EQ(observed->request_headers[0].back().second, "Bearer test-key");
+}
+
+TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"message":{"role":"assistant","content":"Reading file","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"README.md"}}}]},"done":true,"done_reason":"stop"})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  auto request = test_request();
+  request.tools.push_back({"read_file",
+                           "Read a file",
+                           {{"type", "object"},
+                            {"properties", {{"path", {{"type", "string"}}}}},
+                            {"required", {"path"}}}});
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+
+  const auto result = client.send(request);
+
+  ASSERT_TRUE(result);
+  ASSERT_EQ(result.value().content.size(), 2U);
+  EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text,
+            "Reading file");
+  const auto &call = std::get<xoi::ToolUse>(result.value().content[1]);
+  EXPECT_EQ(call.id, "ollama-tool-0");
+  EXPECT_EQ(call.name, "read_file");
+  EXPECT_EQ(call.input["path"], "README.md");
+  EXPECT_EQ(result.value().stop_reason, "stop");
+  ASSERT_EQ(observed->urls[0], "http://localhost:11434/api/chat");
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["messages"][0]["role"], "system");
+  EXPECT_EQ(sent["messages"][0]["content"], "Be concise.");
+  EXPECT_EQ(sent["messages"][1]["role"], "user");
+  EXPECT_EQ(sent["tools"][0]["function"]["name"], "read_file");
+  EXPECT_EQ(sent["tools"][0]["function"]["parameters"]["required"][0], "path");
+  EXPECT_EQ(sent["options"]["num_predict"], request.max_tokens);
+  EXPECT_FALSE(sent["stream"].get<bool>());
+  EXPECT_TRUE(observed->request_headers[0].empty() ||
+              std::none_of(observed->request_headers[0].begin(),
+                           observed->request_headers[0].end(),
+                           [](const auto &header) {
+                             return header.first == "Authorization";
+                           }));
+}
+
+TEST(ClientTest, SerializesOllamaToolResultsAsToolMessages) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"message":{"role":"assistant","content":"done"},"done":true})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+  auto request = test_request();
+  request.messages = {
+      {"assistant",
+       {xoi::ToolUse{"internal-id", "read_file", {{"path", "README.md"}}}}},
+      {"user", {xoi::ToolResult{"internal-id", "file contents", false}}}};
+
+  const auto result = client.send(request);
+
+  ASSERT_TRUE(result);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["messages"][1]["role"], "assistant");
+  EXPECT_EQ(
+      sent["messages"][1]["tool_calls"][0]["function"]["arguments"]["path"],
+      "README.md");
+  EXPECT_EQ(sent["messages"][2]["role"], "tool");
+  EXPECT_EQ(sent["messages"][2]["content"], "file contents");
+}
+
+TEST(ClientTest, StreamsNativeOllamaNdjsonTextAndToolCalls) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello \"},"
+       "\"done\":false}\n"
+       "{\"message\":{\"role\":\"assistant\",\"content\":\"world\","
+       "\"tool_calls\":[{\"function\":{\"name\":\"read_file\","
+       "\"arguments\":{\"path\":\"README.md\"}}}]},\"done\":false}\n"
+       "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+       "\"done_reason\":\"stop\",\"done\":true}\n",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  auto config = test_config(xoi::Provider::Ollama);
+  xoi::Client client(config, std::move(mock));
+  auto request = test_request();
+  std::string streamed_text;
+
+  const auto result =
+      client.send_stream(request, [&streamed_text](std::string_view delta) {
+        streamed_text.append(delta);
+      });
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(streamed_text, "Hello world");
+  ASSERT_EQ(result.value().content.size(), 2U);
+  EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text, "Hello world");
+  const auto &call = std::get<xoi::ToolUse>(result.value().content[1]);
+  EXPECT_EQ(call.name, "read_file");
+  EXPECT_EQ(call.input["path"], "README.md");
+  EXPECT_EQ(result.value().stop_reason, "stop");
+  EXPECT_EQ(observed->urls[0], "http://localhost:11434/api/chat");
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_TRUE(sent["stream"].get<bool>());
+  EXPECT_EQ(observed->request_headers[0].back().second, "application/x-ndjson");
+}
+
+TEST(ClientTest, RejectsMalformedOllamaNdjson) {
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, "{\"message\":\n", {}, {}}});
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Protocol);
+  EXPECT_NE(result.error().message.find("invalid Ollama streaming event"),
+            std::string::npos);
+}
+
+TEST(AgentTest, RunsNativeOllamaToolCycle) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"README.md"}}}]},"done":true})",
+       {},
+       {}},
+      {200,
+       R"({"message":{"role":"assistant","content":"The file says hello."},"done":true,"done_reason":"stop"})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+  xoi::ToolRegistry tools;
+  EXPECT_TRUE(tools
+                  .add({"read_file",
+                        "Read a file",
+                        {{"type", "object"},
+                         {"properties", {{"path", {{"type", "string"}}}}},
+                         {"required", {"path"}}}},
+                       [](const nlohmann::json &input) {
+                         return xoi::Result<std::string>(
+                             "contents of " + input["path"].get<std::string>());
+                       })
+                  .empty());
+
+  const auto result = xoi::run_agent(client, test_request(), tools);
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result.value().text, "The file says hello.");
+  EXPECT_EQ(result.value().tool_calls, 1);
+  const auto follow_up = nlohmann::json::parse(observed->bodies[1]);
+  EXPECT_EQ(follow_up["messages"][2]["tool_calls"][0]["function"]["name"],
+            "read_file");
+  EXPECT_EQ(follow_up["messages"][3]["role"], "tool");
+  EXPECT_EQ(follow_up["messages"][3]["content"], "contents of README.md");
 }
 
 TEST(ClientTest, StreamsAnthropicTextAcrossTransportChunkBoundaries) {
