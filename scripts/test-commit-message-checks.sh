@@ -25,6 +25,10 @@ expect_hook_result() {
 
 expect_hook_result accepted valid 'Add one check (#14)
 '
+expect_hook_result accepted 'co-author trailer' 'Add one check (#14)
+
+Co-authored-by: Example <example@example.com>
+'
 expect_hook_result rejected 'missing issue number' 'Missing issue suffix
 '
 expect_hook_result rejected 'overlong subject' 'This subject is deliberately much too long to pass the seventy two character limit (#14)
@@ -40,11 +44,18 @@ Details
 expect_hook_result rejected 'signed-off trailer' 'Add check (#14)
 Signed-off-by: Example <example@example.com>
 '
-expect_hook_result rejected 'co-author trailer' 'Add check (#14)
+expect_hook_result rejected 'body with co-author trailer' 'Add check (#14)
+
+Details
+
 Co-authored-by: Example <example@example.com>
 '
 expect_hook_result rejected 'generated trailer' 'Add check (#14)
 Generated-by: tool
+'
+expect_hook_result rejected 'malformed co-author trailer' 'Add check (#14)
+
+Co-authored-by: Example
 '
 
 git -C "$tmpdir" init -q
@@ -53,6 +64,8 @@ git -C "$tmpdir" config user.email test@example.invalid
 git -C "$tmpdir" commit --allow-empty -qm 'Base commit (#1)'
 base="$(git -C "$tmpdir" rev-parse HEAD)"
 git -C "$tmpdir" commit --allow-empty -qm 'Valid change (#14)'
+git -C "$tmpdir" commit --allow-empty -m 'Valid change with co-author (#14)' \
+  -m 'Co-authored-by: Example <example@example.com>'
 head="$(git -C "$tmpdir" rev-parse HEAD)"
 git -C "$tmpdir" update-ref refs/remotes/origin/main "$base"
 (cd "$tmpdir" && "$checker" "$base" "$head")
@@ -69,7 +82,15 @@ Details' \
   'Add check (#14)
 Signed-off-by: Example <example@example.com>' \
   'Add check (#14)
+
+Details
+
 Co-authored-by: Example <example@example.com>' \
+  'Add check (#14)
+Co-authored-by: Example <example@example.com>' \
+  'Add check (#14)
+
+Co-authored-by: Example' \
   'Add check (#14)
 Generated-by: tool'; do
   printf '%s\n' "$content" > "$tmpdir/message"

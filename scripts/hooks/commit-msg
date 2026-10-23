@@ -4,8 +4,14 @@ set -euo pipefail
 message_file="${1:?commit message file is required}"
 IFS= read -r subject < "$message_file" || [[ -n "${subject:-}" ]]
 
-if ! awk 'NR > 1 { exit 1 } END { if (NR != 1) exit 1 }' "$message_file"; then
-  echo "error: commit message must contain only one non-empty subject line" >&2
+if ! awk '
+  NR == 1 { next }
+  NR == 2 && $0 == "" { next }
+  NR == 3 && $0 ~ /^Co-authored-by: .+ <[^<>[:space:]]+>$/ { next }
+  { exit 1 }
+  END { if (NR != 1 && NR != 3) exit 1 }
+' "$message_file"; then
+  echo "error: commit message must have one subject and an optional co-author trailer" >&2
   exit 1
 fi
 
