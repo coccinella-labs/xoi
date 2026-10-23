@@ -9,29 +9,35 @@
 
 namespace xoi {
 
+/// A plain text content block.
 struct Text {
   std::string text;
 };
 
+/// A model request to execute a named tool with JSON input.
 struct ToolUse {
   std::string id;
   std::string name;
   nlohmann::json input = nlohmann::json::object();
 };
 
+/// The result of executing a tool requested by the model.
 struct ToolResult {
   std::string tool_use_id;
   std::string content;
   bool is_error = false;
 };
 
+/// A supported message content block.
 using Block = std::variant<Text, ToolUse, ToolResult>;
 
+/// A user or assistant message containing ordered content blocks.
 struct Message {
   std::string role;
   std::vector<Block> content;
 };
 
+/// A tool description and its JSON Schema input shape.
 struct ToolSpec {
   std::string name;
   std::string description;
@@ -39,11 +45,13 @@ struct ToolSpec {
                                  {"properties", nlohmann::json::object()}};
 };
 
+/// The API wire format selected for a client.
 enum class Provider : std::uint8_t {
   Anthropic,
   OpenAICompatible,
 };
 
+/// A request sent to an LLM provider.
 struct Request {
   std::string model;
   std::string system;
@@ -52,6 +60,7 @@ struct Request {
   int max_tokens = 1024;
 };
 
+/// A parsed response from an LLM provider.
 struct Response {
   std::vector<Block> content;
   std::string stop_reason;

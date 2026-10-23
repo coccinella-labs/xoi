@@ -10,6 +10,7 @@
 
 namespace xoi {
 
+/// Describes the category of an SDK error.
 enum class ErrorKind : std::uint8_t {
   Configuration,
   Transport,
@@ -18,6 +19,7 @@ enum class ErrorKind : std::uint8_t {
   Limit,
 };
 
+/// Describes an SDK or provider error without throwing for request failures.
 struct Error {
   ErrorKind kind = ErrorKind::Protocol;
   std::string message;
@@ -25,23 +27,31 @@ struct Error {
   bool retryable = false;
 };
 
+/// Holds either a successful value or an SDK error.
 template <typename T> class Result {
 public:
+  /// Constructs a successful result.
   Result(T value) : value_(std::move(value)) {}
+  /// Constructs a failed result.
   Result(Error error) : value_(std::move(error)) {}
 
+  /// Returns true when this result contains a value.
   bool has_value() const {
     return std::holds_alternative<T>(value_);
   }
+  /// Returns true when this result contains a value.
   explicit operator bool() const {
     return has_value();
   }
+  /// Returns the value; call only when the result is successful.
   const T &value() const {
     return std::get<T>(value_);
   }
+  /// Returns the mutable value; call only when the result is successful.
   T &value() {
     return std::get<T>(value_);
   }
+  /// Returns the error; call only when the result has failed.
   const Error &error() const {
     return std::get<Error>(value_);
   }
@@ -50,6 +60,7 @@ private:
   std::variant<T, Error> value_;
 };
 
+/// Configures the provider, credentials, HTTP timeout, and retry policy.
 struct Config {
   Provider provider = Provider::Anthropic;
   std::string api_key;
@@ -59,13 +70,18 @@ struct Config {
   int initial_backoff_ms = 250;
   int max_backoff_sec = 8;
 
+  /// Loads provider credentials and optional endpoint overrides from the
+  /// environment.
   static Config from_env(Provider provider = Provider::Anthropic);
 };
 
+/// Sends blocking requests to an LLM provider.
 class Client {
 public:
+  /// Creates a client with an optional custom transport.
   explicit Client(Config config,
                   std::unique_ptr<Transport> transport = nullptr);
+  /// Sends a request and returns a response or a typed error.
   Result<Response> send(const Request &request) const;
 
 private:
