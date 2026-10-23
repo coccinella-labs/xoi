@@ -933,8 +933,6 @@ Result<Response> Client::send_impl(
       headers.emplace_back(config_.api_key_header, config_.api_key);
     } else if (config_.provider == Provider::Anthropic) {
       headers.emplace_back("x-api-key", config_.api_key);
-    } else if (config_.provider == Provider::OpenAICompatible) {
-      headers.emplace_back("Authorization", "Bearer " + config_.api_key);
     } else {
       headers.emplace_back("Authorization", "Bearer " + config_.api_key);
     }
