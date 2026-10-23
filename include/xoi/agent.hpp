@@ -26,12 +26,12 @@ public:
   /// The schema remains explicit and must agree with the JSON conversion.
   template <typename Arguments>
   std::string
-  add_typed(ToolSpec spec,
+  add_typed(const ToolSpec &spec,
             std::function<Result<std::string>(const Arguments &)> handler) {
     if (!handler)
       return "tool handler is empty";
-    return add(std::move(spec), [handler = std::move(handler)](
-                                    const nlohmann::json &input) {
+    return add(spec, [handler =
+                          std::move(handler)](const nlohmann::json &input) {
       try {
         const Arguments arguments = input.get<Arguments>();
         return handler(arguments);
