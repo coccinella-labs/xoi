@@ -9,12 +9,13 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <exception>
 #include <map>
+#include <mutex>
 #include <stdexcept>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -1128,11 +1129,12 @@ Result<Response> Client::send_impl(
                                      (std::min)(attempt, 20)));
         wait_ms = (std::min)(exponential_ms, max_wait_ms);
       }
-      while (wait_ms > 0 && !request.stop_token.stop_requested()) {
-        const auto wait_chunk = (std::min)(wait_ms, int64_t{100});
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait_chunk));
-        wait_ms -= wait_chunk;
-      }
+      std::condition_variable_any backoff_condition;
+      std::mutex backoff_mutex;
+      std::unique_lock lock(backoff_mutex);
+      backoff_condition.wait_for(lock, request.stop_token,
+                                 std::chrono::milliseconds(wait_ms),
+                                 [] { return false; });
       if (request.stop_token.stop_requested())
         return Error{ErrorKind::Cancelled, "request cancelled", 0, false};
       continue;
