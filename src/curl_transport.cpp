@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <utility>
 
@@ -22,6 +23,25 @@ struct CurlHandle {
   ~CurlHandle() {
     if (value)
       curl_easy_cleanup(value);
+  }
+};
+
+struct CurlMultiHandle {
+  CURLM *value = curl_multi_init();
+  ~CurlMultiHandle() {
+    if (value)
+      curl_multi_cleanup(value);
+  }
+};
+
+struct CurlMultiAttachment {
+  CURLM *multi;
+  CURL *easy;
+  bool attached = false;
+
+  ~CurlMultiAttachment() {
+    if (attached)
+      curl_multi_remove_handle(multi, easy);
   }
 };
 
@@ -126,12 +146,23 @@ perform_post(const std::string &url, const std::string &body,
              const std::vector<std::pair<std::string, std::string>> &headers,
              int timeout_sec, std::size_t max_response_bytes,
              const StreamChunkHandler *on_chunk,
-             const std::optional<std::string> &proxy_url) {
+             const std::optional<std::string> &proxy_url,
+             const std::stop_token &stop_token) {
   HttpResponse response;
+  if (stop_token.stop_requested()) {
+    response.cancelled = true;
+    return response;
+  }
   const CURLcode global_code = initialize_curl();
   if (global_code != CURLE_OK) {
     response.transport_failure = TransportFailure::Initialization;
     response.transport_error = curl_easy_strerror(global_code);
+    return response;
+  }
+  CurlMultiHandle multi;
+  if (!multi.value) {
+    response.transport_failure = TransportFailure::HandleCreation;
+    response.transport_error = "curl_multi_init failed";
     return response;
   }
   CurlHandle handle{curl_easy_init()};
@@ -193,7 +224,29 @@ perform_post(const std::string &url, const std::string &body,
   if (proxy_url && !set_option(CURLOPT_PROXY, "PROXY", proxy_url->c_str()))
     return response;
 
-  const CURLcode code = curl_easy_perform(handle.value);
+  CurlMultiAttachment attachment{multi.value, handle.value};
+  CURLMcode multi_code = curl_multi_add_handle(multi.value, handle.value);
+  if (multi_code != CURLM_OK) {
+    response.transport_failure = TransportFailure::Other;
+    response.transport_error = std::string("curl_multi_add_handle: ") +
+                               curl_multi_strerror(multi_code);
+    return response;
+  }
+  attachment.attached = true;
+  std::stop_callback wakeup(stop_token, [multi_handle = multi.value] {
+    curl_multi_wakeup(multi_handle);
+  });
+
+  int running_handles = 0;
+  multi_code = curl_multi_perform(multi.value, &running_handles);
+  while (multi_code == CURLM_OK && running_handles > 0 &&
+         !stop_token.stop_requested()) {
+    int descriptors = 0;
+    multi_code = curl_multi_poll(multi.value, nullptr, 0, 100, &descriptors);
+    if (multi_code != CURLM_OK)
+      break;
+    multi_code = curl_multi_perform(multi.value, &running_handles);
+  }
   response.body = std::move(body_state.body);
   response.response_bytes_received = body_state.received_bytes;
   response.response_too_large = body_state.too_large;
@@ -203,12 +256,36 @@ perform_post(const std::string &url, const std::string &body,
     response.transport_failure = TransportFailure::Callback;
     response.transport_error = "curl response callback failed";
   }
-  if (code != CURLE_OK) {
+  if (stop_token.stop_requested()) {
+    response.cancelled = true;
+    return response;
+  }
+  if (multi_code != CURLM_OK) {
+    response.transport_failure = TransportFailure::Other;
+    response.transport_error = std::string("curl multi transfer failed: ") +
+                               curl_multi_strerror(multi_code);
+    return response;
+  }
+  CURLcode transfer_code = CURLE_OK;
+  bool transfer_completed = false;
+  int messages_left = 0;
+  while (CURLMsg *message = curl_multi_info_read(multi.value, &messages_left)) {
+    if (message->msg == CURLMSG_DONE && message->easy_handle == handle.value) {
+      transfer_code = message->data.result;
+      transfer_completed = true;
+    }
+  }
+  if (!transfer_completed) {
+    response.transport_failure = TransportFailure::Other;
+    response.transport_error = "libcurl completed without a transfer result";
+    return response;
+  }
+  if (transfer_code != CURLE_OK) {
     if (response.transport_error.empty())
       response.transport_error =
-          error_buffer[0] ? error_buffer : curl_easy_strerror(code);
+          error_buffer[0] ? error_buffer : curl_easy_strerror(transfer_code);
     if (response.transport_failure == TransportFailure::None)
-      response.transport_failure = transport_failure_for(code);
+      response.transport_failure = transport_failure_for(transfer_code);
     return response;
   }
   long status_code = 0;
@@ -238,7 +315,16 @@ HttpResponse CurlTransport::post(
     const std::vector<std::pair<std::string, std::string>> &headers,
     int timeout_sec, std::size_t max_response_bytes) {
   return perform_post(url, body, headers, timeout_sec, max_response_bytes,
-                      nullptr, proxy_url_);
+                      nullptr, proxy_url_, {});
+}
+
+HttpResponse CurlTransport::post(
+    const std::string &url, const std::string &body,
+    const std::vector<std::pair<std::string, std::string>> &headers,
+    int timeout_sec, std::size_t max_response_bytes,
+    const std::stop_token &stop_token) {
+  return perform_post(url, body, headers, timeout_sec, max_response_bytes,
+                      nullptr, proxy_url_, stop_token);
 }
 
 HttpResponse CurlTransport::post_stream(
@@ -247,7 +333,16 @@ HttpResponse CurlTransport::post_stream(
     int timeout_sec, std::size_t max_response_bytes,
     const StreamChunkHandler &on_chunk) {
   return perform_post(url, body, headers, timeout_sec, max_response_bytes,
-                      &on_chunk, proxy_url_);
+                      &on_chunk, proxy_url_, {});
+}
+
+HttpResponse CurlTransport::post_stream(
+    const std::string &url, const std::string &body,
+    const std::vector<std::pair<std::string, std::string>> &headers,
+    int timeout_sec, std::size_t max_response_bytes,
+    const StreamChunkHandler &on_chunk, const std::stop_token &stop_token) {
+  return perform_post(url, body, headers, timeout_sec, max_response_bytes,
+                      &on_chunk, proxy_url_, stop_token);
 }
 
 } // namespace xoi

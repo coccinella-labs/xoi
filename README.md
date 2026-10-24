@@ -39,6 +39,8 @@ default prediction limit.
 
 ## Build
 
+Requires CMake 3.20 and libcurl 7.68 or newer.
+
 ```sh
 cmake -S . -B build && cmake --build build
 ```
@@ -65,9 +67,15 @@ It delivers text deltas to a callback and returns any completed tool calls
 with the final response.
 
 `run_agent` can observe model/tool lifecycle progress and accepts a
-`std::stop_token` for cooperative cancellation between blocking model requests
-and tool calls. Cancellation does not interrupt an active request or handler.
-Progress events include tool names, but not tool arguments or results.
+`std::stop_token` for cancellation. `Client::send` and `Client::send_stream`
+use the token on `xoi::Request`; `CurlTransport` interrupts an active request,
+and text deltas delivered before cancellation remain available through the
+stream callback. Legacy custom transports remain source-compatible but can
+only observe cancellation after their blocking call unless they override the
+token-aware transport methods. Existing tool handlers remain supported;
+token-aware handlers can receive the stop token and must cooperate to stop
+work already in progress. Progress events include tool names, but not tool
+arguments or results.
 
 `ToolRegistry::add_typed<Arguments>` converts a tool's JSON input to a
 caller-defined C++ type using nlohmann JSON's `from_json` customization. The

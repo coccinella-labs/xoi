@@ -10,15 +10,28 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -88,6 +101,172 @@ public:
 private:
   std::deque<xoi::HttpResponse> responses_;
 };
+
+class CancellableMockTransport final : public xoi::Transport {
+public:
+  xoi::HttpResponse
+  post(const std::string &, const std::string &,
+       const std::vector<std::pair<std::string, std::string>> &, int,
+       std::size_t) override {
+    return {};
+  }
+
+  xoi::HttpResponse
+  post(const std::string &, const std::string &,
+       const std::vector<std::pair<std::string, std::string>> &, int,
+       std::size_t, const std::stop_token &stop_token) override {
+    return wait_for_cancellation(stop_token);
+  }
+
+  xoi::HttpResponse
+  post_stream(const std::string &, const std::string &,
+              const std::vector<std::pair<std::string, std::string>> &, int,
+              std::size_t, const xoi::StreamChunkHandler &) override {
+    return {};
+  }
+
+  xoi::HttpResponse
+  post_stream(const std::string &, const std::string &,
+              const std::vector<std::pair<std::string, std::string>> &, int,
+              std::size_t, const xoi::StreamChunkHandler &on_chunk,
+              const std::stop_token &stop_token) override {
+    on_chunk("event: content_block_delta\n"
+             "data: {\"type\":\"content_block_delta\",\"index\":0,"
+             "\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n");
+    return wait_for_cancellation(stop_token);
+  }
+
+  bool wait_until_entered(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this] { return entered_; });
+  }
+
+  int calls() const {
+    return calls_;
+  }
+
+private:
+  xoi::HttpResponse wait_for_cancellation(const std::stop_token &stop_token) {
+    std::unique_lock lock(mutex_);
+    ++calls_;
+    entered_ = true;
+    condition_.notify_all();
+    std::stop_callback wakeup(stop_token, [this] { condition_.notify_all(); });
+    condition_.wait(lock, [stop_token] { return stop_token.stop_requested(); });
+    xoi::HttpResponse response;
+    response.cancelled = true;
+    return response;
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  bool entered_ = false;
+  int calls_ = 0;
+};
+
+#ifndef _WIN32
+class StalledSseServer {
+public:
+  StalledSseServer() {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listener_ < 0)
+      return;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (::bind(listener_, reinterpret_cast<sockaddr *>(&address),
+               sizeof(address)) != 0 ||
+        ::listen(listener_, 1) != 0) {
+      ::close(listener_);
+      listener_ = -1;
+      return;
+    }
+    socklen_t address_size = sizeof(address);
+    if (::getsockname(listener_, reinterpret_cast<sockaddr *>(&address),
+                      &address_size) != 0) {
+      ::close(listener_);
+      listener_ = -1;
+      return;
+    }
+    port_ = ntohs(address.sin_port);
+    worker_ = std::thread([this] { serve(); });
+  }
+
+  ~StalledSseServer() {
+    stop();
+    if (listener_ >= 0) {
+      ::shutdown(listener_, SHUT_RDWR);
+      ::close(listener_);
+      listener_ = -1;
+    }
+    if (worker_.joinable())
+      worker_.join();
+  }
+
+  bool ready() const {
+    return listener_ >= 0;
+  }
+
+  std::uint16_t port() const {
+    return port_;
+  }
+
+  void stop() {
+    std::lock_guard lock(mutex_);
+    stopped_ = true;
+    if (client_ >= 0)
+      ::shutdown(client_, SHUT_RDWR);
+    condition_.notify_all();
+  }
+
+private:
+  void serve() {
+    const int client = ::accept(listener_, nullptr, nullptr);
+    if (client < 0)
+      return;
+    {
+      std::lock_guard lock(mutex_);
+      client_ = client;
+    }
+    constexpr std::string_view payload =
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+    std::ostringstream chunk_builder;
+    chunk_builder << std::hex << payload.size() << "\r\n" << payload << "\r\n";
+    const std::string chunk = chunk_builder.str();
+    const std::string response = "HTTP/1.1 200 OK\r\n"
+                                 "Content-Type: text/event-stream\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "Connection: keep-alive\r\n\r\n" +
+                                 chunk;
+    std::size_t offset = 0;
+    while (offset < response.size()) {
+      const auto sent =
+          ::send(client, response.data() + offset, response.size() - offset, 0);
+      if (sent <= 0)
+        break;
+      offset += static_cast<std::size_t>(sent);
+    }
+    std::unique_lock lock(mutex_);
+    condition_.wait(lock, [this] { return stopped_; });
+    ::close(client);
+    client_ = -1;
+  }
+
+  int listener_ = -1;
+  int client_ = -1;
+  std::uint16_t port_ = 0;
+  std::thread worker_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool stopped_ = false;
+};
+#endif
 
 struct VerificationArguments {
   std::string target;
@@ -1009,6 +1188,127 @@ TEST(ClientTest, RejectsZeroResponseBodyLimit) {
   EXPECT_EQ(observed->calls(), 0U);
 }
 
+TEST(ClientTest, CancelsTokenAwareNonStreamingTransport) {
+  auto mock = std::make_unique<CancellableMockTransport>();
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  std::stop_source stop_source;
+  auto request = test_request();
+  request.stop_token = stop_source.get_token();
+  std::promise<xoi::Result<xoi::Response>> promise;
+  auto result_future = promise.get_future();
+  std::thread request_thread([&] { promise.set_value(client.send(request)); });
+
+  const bool entered = observed->wait_until_entered(std::chrono::seconds(2));
+  stop_source.request_stop();
+  const bool returned = result_future.wait_for(std::chrono::seconds(1)) ==
+                        std::future_status::ready;
+  request_thread.join();
+
+  ASSERT_TRUE(returned);
+  EXPECT_TRUE(entered);
+  const auto result = result_future.get();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(observed->calls(), 1);
+}
+
+TEST(ClientTest, CancelsTokenAwareTransportAndKeepsPartialStreamText) {
+  auto mock = std::make_unique<CancellableMockTransport>();
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  std::stop_source stop_source;
+  auto request = test_request();
+  request.stop_token = stop_source.get_token();
+  std::string streamed_text;
+  std::promise<xoi::Result<xoi::Response>> promise;
+  auto result_future = promise.get_future();
+  std::thread request_thread([&] {
+    promise.set_value(
+        client.send_stream(request, [&streamed_text](std::string_view delta) {
+          streamed_text.append(delta);
+        }));
+  });
+
+  const bool entered = observed->wait_until_entered(std::chrono::seconds(2));
+  stop_source.request_stop();
+  const bool returned = result_future.wait_for(std::chrono::seconds(1)) ==
+                        std::future_status::ready;
+  request_thread.join();
+
+  ASSERT_TRUE(returned);
+  EXPECT_TRUE(entered);
+  const auto result = result_future.get();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(streamed_text, "partial");
+  EXPECT_EQ(observed->calls(), 1);
+}
+
+TEST(CurlTransportTest, CancelsStalledStreamingRequestPromptly) {
+#ifdef _WIN32
+  GTEST_SKIP() << "loopback socket fixture is not implemented for Windows";
+#else
+  StalledSseServer server;
+  ASSERT_TRUE(server.ready());
+  auto config = test_config();
+  config.base_url = "http://127.0.0.1:" + std::to_string(server.port());
+  config.proxy_url = std::string{};
+  config.timeout_sec = 10;
+  xoi::Client client(std::move(config));
+  std::stop_source stop_source;
+  auto request = test_request();
+  request.stop_token = stop_source.get_token();
+  std::mutex text_mutex;
+  std::condition_variable text_condition;
+  std::string streamed_text;
+  std::promise<xoi::Result<xoi::Response>> promise;
+  auto result_future = promise.get_future();
+  std::thread request_thread([&] {
+    promise.set_value(client.send_stream(request, [&](std::string_view delta) {
+      {
+        std::lock_guard lock(text_mutex);
+        streamed_text.append(delta);
+      }
+      text_condition.notify_all();
+    }));
+  });
+  bool received_partial = false;
+  {
+    std::unique_lock lock(text_mutex);
+    received_partial = text_condition.wait_for(
+        lock, std::chrono::seconds(5),
+        [&streamed_text] { return streamed_text == "partial"; });
+  }
+  const auto cancel_started = std::chrono::steady_clock::now();
+  stop_source.request_stop();
+  constexpr auto cancellation_bound = std::chrono::milliseconds(750);
+  const bool returned_promptly =
+      result_future.wait_for(cancellation_bound) == std::future_status::ready;
+  const auto cancellation_time =
+      std::chrono::steady_clock::now() - cancel_started;
+  if (!returned_promptly)
+    server.stop();
+  const bool completed =
+      returned_promptly || result_future.wait_for(std::chrono::seconds(3)) ==
+                               std::future_status::ready;
+  request_thread.join();
+  server.stop();
+
+  ASSERT_TRUE(completed);
+  EXPECT_TRUE(received_partial);
+  EXPECT_TRUE(returned_promptly);
+  EXPECT_LT(
+      std::chrono::duration_cast<std::chrono::milliseconds>(cancellation_time)
+          .count(),
+      cancellation_bound.count());
+  const auto result = result_future.get();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(streamed_text, "partial");
+#endif
+}
+
 TEST(CurlBodyCallbackTest, ReturnsZeroAndMarksFailureWhenAppendThrows) {
   xoi::detail::BodyCallbackState state;
   state.max_bytes = 16;
@@ -1621,6 +1921,38 @@ TEST(AgentTest, CancellationFromProgressCallbackPreventsToolExecution) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
   EXPECT_EQ(executions, 0);
+}
+
+TEST(AgentTest, PassesStopTokenToCancellableToolHandler) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"work","input":{}}],"stop_reason":"tool_use"})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  std::stop_source stop_source;
+  bool handler_received_token = false;
+  EXPECT_TRUE(tools
+                  .add({"work", "Cooperative work", {{"type", "object"}}},
+                       [&stop_source, &handler_received_token](
+                           const nlohmann::json &, std::stop_token stop_token) {
+                         handler_received_token =
+                             stop_token == stop_source.get_token();
+                         stop_source.request_stop();
+                         return xoi::Result<std::string>("stopped");
+                       })
+                  .empty());
+  xoi::AgentOptions options;
+  options.stop_token = stop_source.get_token();
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_TRUE(handler_received_token);
+  EXPECT_EQ(observed->calls(), 1U);
 }
 
 TEST(AgentTest, ReportsProgressCallbackExceptions) {

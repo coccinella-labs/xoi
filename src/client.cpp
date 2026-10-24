@@ -868,6 +868,8 @@ Result<Response> Client::send_stream(
 Result<Response> Client::send_impl(
     const Request &request,
     const std::function<void(std::string_view)> *on_text_delta) const {
+  if (request.stop_token.stop_requested())
+    return Error{ErrorKind::Cancelled, "request cancelled", 0, false};
   if (config_.provider != Provider::Ollama && config_.api_key.empty())
     return Error{ErrorKind::Configuration, "API key is empty", 0, false};
   if (config_.base_url.empty())
@@ -948,6 +950,8 @@ Result<Response> Client::send_impl(
   const std::string url = endpoint(config_);
   const std::string serialized_body = body.dump();
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
+    if (request.stop_token.stop_requested())
+      return Error{ErrorKind::Cancelled, "request cancelled", 0, false};
     std::unique_ptr<SseDecoder> sse_decoder;
     std::unique_ptr<OllamaStreamDecoder> ollama_decoder;
     std::exception_ptr callback_exception;
@@ -972,13 +976,16 @@ Result<Response> Client::send_impl(
           throw;
         }
       };
-      http = transport_->post_stream(url, serialized_body, headers,
-                                     config_.timeout_sec,
-                                     config_.max_response_bytes, on_chunk);
+      http = transport_->post_stream(
+          url, serialized_body, headers, config_.timeout_sec,
+          config_.max_response_bytes, on_chunk, request.stop_token);
     } else {
-      http = transport_->post(url, serialized_body, headers,
-                              config_.timeout_sec, config_.max_response_bytes);
+      http =
+          transport_->post(url, serialized_body, headers, config_.timeout_sec,
+                           config_.max_response_bytes, request.stop_token);
     }
+    if (http.cancelled || request.stop_token.stop_requested())
+      return Error{ErrorKind::Cancelled, "request cancelled", 0, false};
     if (http.response_too_large) {
       return Error{ErrorKind::ResponseTooLarge,
                    "response body exceeds configured size limit", 0, false};
@@ -1028,8 +1035,13 @@ Result<Response> Client::send_impl(
                                      (std::min)(attempt, 20)));
         wait_ms = (std::min)(exponential_ms, max_wait_ms);
       }
-      if (wait_ms > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+      while (wait_ms > 0 && !request.stop_token.stop_requested()) {
+        const auto wait_chunk = (std::min)(wait_ms, int64_t{100});
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_chunk));
+        wait_ms -= wait_chunk;
+      }
+      if (request.stop_token.stop_requested())
+        return Error{ErrorKind::Cancelled, "request cancelled", 0, false};
       continue;
     }
     if (!http.transport_error.empty()) {

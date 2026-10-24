@@ -243,6 +243,17 @@ std::string final_text(const std::vector<Block> &blocks) {
 } // namespace
 
 std::string ToolRegistry::add(ToolSpec spec, ToolHandler handler) {
+  if (!handler)
+    return "tool handler is empty";
+  CancellableToolHandler cancellable =
+      [handler = std::move(handler)](const nlohmann::json &input,
+                                     const std::stop_token &) {
+        return handler(input);
+      };
+  return add(std::move(spec), std::move(cancellable));
+}
+
+std::string ToolRegistry::add(ToolSpec spec, CancellableToolHandler handler) {
   if (spec.name.empty())
     return "tool name is empty";
   if (!handler)
@@ -265,8 +276,9 @@ const std::vector<ToolSpec> &ToolRegistry::specs() const {
   return specs_;
 }
 
-Result<std::string> ToolRegistry::execute(const std::string &name,
-                                          const nlohmann::json &input) const {
+Result<std::string>
+ToolRegistry::execute(const std::string &name, const nlohmann::json &input,
+                      const std::stop_token &stop_token) const {
   const auto entry = std::find_if(
       entries_.begin(), entries_.end(),
       [&name](const Entry &candidate) { return candidate.spec.name == name; });
@@ -275,7 +287,7 @@ Result<std::string> ToolRegistry::execute(const std::string &name,
   const std::string argument_error = validate_input(entry->spec, input);
   if (!argument_error.empty())
     return Error{ErrorKind::Protocol, argument_error, 0, false};
-  return entry->handler(input);
+  return entry->handler(input, stop_token);
 }
 
 Result<AgentResponse> run_agent(Client &client, Request request,
@@ -285,6 +297,10 @@ Result<AgentResponse> run_agent(Client &client, Request request,
       options.max_repeats_per_tool_call <= 0)
     return Error{ErrorKind::Configuration, "agent limits must be positive", 0,
                  false};
+  const std::stop_token stop_token = options.stop_token.stop_possible()
+                                         ? options.stop_token
+                                         : request.stop_token;
+  request.stop_token = stop_token;
   request.tools = tools.specs();
   AgentResponse result;
   std::map<std::string, std::pair<std::string, bool>> previous_results;
@@ -311,12 +327,12 @@ Result<AgentResponse> run_agent(Client &client, Request request,
   };
 
   for (int step = 0; step < options.max_steps; ++step) {
-    if (options.stop_token.stop_requested())
+    if (stop_token.stop_requested())
       return cancelled();
     if (const auto error =
             notify({AgentEventKind::ModelRequestStarted, step + 1, {}, false}))
       return *error;
-    if (options.stop_token.stop_requested())
+    if (stop_token.stop_requested())
       return cancelled();
     auto response = client.send(request);
     if (!response)
@@ -326,7 +342,7 @@ Result<AgentResponse> run_agent(Client &client, Request request,
     if (const auto error = notify(
             {AgentEventKind::ModelResponseReceived, step + 1, {}, false}))
       return *error;
-    if (options.stop_token.stop_requested())
+    if (stop_token.stop_requested())
       return cancelled();
 
     std::vector<Block> tool_results;
@@ -360,7 +376,7 @@ Result<AgentResponse> run_agent(Client &client, Request request,
     }
 
     for (const ToolUse *call : calls) {
-      if (options.stop_token.stop_requested())
+      if (stop_token.stop_requested())
         return cancelled();
       ++result.tool_calls;
       const std::string key = call->name + "\n" + call->input.dump();
@@ -370,7 +386,7 @@ Result<AgentResponse> run_agent(Client &client, Request request,
                 notify({AgentEventKind::ToolCallRepeated, step + 1, call->name,
                         previous->second.second}))
           return *error;
-        if (options.stop_token.stop_requested())
+        if (stop_token.stop_requested())
           return cancelled();
         ++repeat_counts[key];
         tool_results.push_back(
@@ -385,9 +401,11 @@ Result<AgentResponse> run_agent(Client &client, Request request,
         if (const auto error = notify({AgentEventKind::ToolExecutionStarted,
                                        step + 1, call->name, false}))
           return *error;
-        if (options.stop_token.stop_requested())
+        if (stop_token.stop_requested())
           return cancelled();
-        auto tool_result = tools.execute(call->name, call->input);
+        auto tool_result = tools.execute(call->name, call->input, stop_token);
+        if (stop_token.stop_requested())
+          return cancelled();
         const bool is_error = !tool_result;
         if (tool_result) {
           previous_results.emplace(key,
@@ -403,7 +421,7 @@ Result<AgentResponse> run_agent(Client &client, Request request,
         if (const auto error = notify({AgentEventKind::ToolExecutionCompleted,
                                        step + 1, call->name, is_error}))
           return *error;
-        if (options.stop_token.stop_requested())
+        if (stop_token.stop_requested())
           return cancelled();
       }
     }

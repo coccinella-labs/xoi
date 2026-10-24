@@ -98,7 +98,9 @@ struct Config {
   static Config from_env(Provider provider = Provider::Anthropic);
 };
 
-/// Sends blocking requests to an LLM provider.
+/// Sends blocking requests to an LLM provider. A request stop token cancels
+/// CurlTransport promptly; streamed text delivered before cancellation remains
+/// available through the callback.
 class Client {
 public:
   /// Creates a client with an optional custom transport.
