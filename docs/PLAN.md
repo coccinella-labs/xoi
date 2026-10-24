@@ -58,7 +58,7 @@ complete coding-agent framework or a production-proven agentware integration.
 | Context management | Partial | Agent steps and tool calls are bounded. Conversation history is not compacted or token-budgeted by xoi. |
 | Repeat detection | Done | Identical tool/argument calls are not re-executed; the earlier result and a hint are returned, repeats consume the call budget, and a repeat threshold stops the run. |
 | Safety and authorization | Host-owned | xoi validates basic argument shape but does not provide workspace containment, secrets filtering, consent, or command isolation. Applications must enforce these before handlers run. |
-| Cancellation and progress | Partial | `std::stop_token` and progress callbacks work between blocking requests and tool calls. They do not interrupt an active request or handler. |
+| Cancellation and progress | Partial | `std::stop_token` and progress callbacks work between blocking requests and tool calls. Active libcurl requests will use the multi interface with `curl_multi_poll` and `curl_multi_wakeup`; tool handlers remain cooperative and must observe the token themselves. |
 | Full-stack web/serverless support | Out of scope | xoi is a native C++ SDK, not a frontend/backend language ecosystem. It should integrate with C++ applications, not attempt to duplicate Node.js platform reach. |
 | C++ ecosystem and model fluency | Out of scope | C++ cannot reproduce npm's package breadth or TypeScript's training-data prevalence. xoi should keep dependencies focused, APIs discoverable, and examples precise. |
 
