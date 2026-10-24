@@ -1412,6 +1412,43 @@ TEST(ClientTest, CancelsTokenAwareTransportAndKeepsPartialStreamText) {
   EXPECT_EQ(observed->calls(), 1);
 }
 
+TEST(ClientTest, CancelsRetryBackoffPromptly) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {429, R"({"error":{"message":"try again"}})", {}, {}},
+      {200,
+       R"({"content":[{"type":"text","text":"unexpected retry"}]})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  auto config = test_config();
+  config.max_retries = 1;
+  config.initial_backoff_ms = 5000;
+  config.max_backoff_sec = 5;
+  xoi::Client client(std::move(config), std::move(mock));
+  std::stop_source stop_source;
+  auto request = test_request();
+  request.stop_token = stop_source.get_token();
+  std::promise<xoi::Result<xoi::Response>> promise;
+  auto result_future = promise.get_future();
+  std::thread request_thread([&] { promise.set_value(client.send(request)); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  const auto cancel_started = std::chrono::steady_clock::now();
+  stop_source.request_stop();
+  constexpr auto cancellation_bound = std::chrono::seconds(1);
+  const bool returned_promptly =
+      result_future.wait_for(cancellation_bound) == std::future_status::ready;
+  request_thread.join();
+  const auto result = result_future.get();
+
+  EXPECT_TRUE(returned_promptly);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(observed->calls(), 1U);
+  EXPECT_LT(std::chrono::steady_clock::now() - cancel_started,
+            cancellation_bound);
+}
+
 TEST(CurlTransportTest, CancelsStalledStreamingRequestPromptly) {
 #ifdef _WIN32
   GTEST_SKIP() << "loopback socket fixture is not implemented for Windows";
