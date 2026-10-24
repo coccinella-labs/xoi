@@ -112,6 +112,17 @@ std::string validate_schema_definition(const nlohmann::json &schema,
       return path + " " + std::string(bound) +
              " must be a non-negative integer";
   }
+  if (schema.contains("minimum") && schema.contains("maximum") &&
+      schema["minimum"] > schema["maximum"])
+    return path + " minimum must not exceed maximum";
+  if (schema.contains("minLength") && schema.contains("maxLength") &&
+      schema["minLength"].get<std::uint64_t>() >
+          schema["maxLength"].get<std::uint64_t>())
+    return path + " minLength must not exceed maxLength";
+  if (schema.contains("minItems") && schema.contains("maxItems") &&
+      schema["minItems"].get<std::uint64_t>() >
+          schema["maxItems"].get<std::uint64_t>())
+    return path + " minItems must not exceed maxItems";
   for (const std::string_view annotation :
        {"description", "title", "$schema", "$comment"}) {
     if (schema.contains(annotation) && !schema[annotation].is_string())
