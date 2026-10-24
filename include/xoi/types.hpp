@@ -67,10 +67,21 @@ struct Request {
   std::stop_token stop_token;
 };
 
+/// Provider-reported token counts. Missing counts remain unknown; no costs
+/// are calculated from usage.
+struct Usage {
+  std::optional<std::uint64_t> input_tokens;
+  std::optional<std::uint64_t> output_tokens;
+  std::optional<std::uint64_t> cache_read_input_tokens;
+  std::optional<std::uint64_t> cache_creation_input_tokens;
+};
+
 /// A parsed response from an LLM provider.
 struct Response {
   std::vector<Block> content;
   std::string stop_reason;
+  /// Token counts reported by the provider, when available.
+  std::optional<Usage> usage;
 };
 
 } // namespace xoi

@@ -426,6 +426,7 @@ TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {
   const auto result = client.send(request);
 
   ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
   ASSERT_EQ(result.value().content.size(), 1U);
   EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text, "Hi");
   EXPECT_EQ(result.value().stop_reason, "end_turn");
@@ -445,6 +446,24 @@ TEST(ClientTest, SerializesAnthropicMessagesAndToolSchema) {
                       std::make_pair(std::string("x-api-key"),
                                      std::string("test-key"))),
             headers.end());
+}
+
+TEST(ClientTest, ParsesAnthropicBlockingUsageAndCacheCounts) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}})",
+       {},
+       {}}});
+  xoi::Client client(test_config(), std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 12U);
+  EXPECT_EQ(result.value().usage->output_tokens, 7U);
+  EXPECT_EQ(result.value().usage->cache_read_input_tokens, 5U);
+  EXPECT_EQ(result.value().usage->cache_creation_input_tokens, 2U);
 }
 
 TEST(ClientTest, ParsesAnthropicToolUse) {
@@ -646,6 +665,7 @@ TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   const auto result = client.send(request);
 
   ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
   ASSERT_EQ(result.value().content.size(), 1U);
   const auto &tool = std::get<xoi::ToolUse>(result.value().content[0]);
   EXPECT_EQ(tool.name, "list_dir");
@@ -661,6 +681,43 @@ TEST(ClientTest, ParsesOpenAICompatibleToolResponse) {
   EXPECT_FALSE(sent.contains("top_p"));
   EXPECT_EQ(observed->request_headers[0].back().first, "Authorization");
   EXPECT_EQ(observed->request_headers[0].back().second, "Bearer test-key");
+}
+
+TEST(ClientTest, ParsesOpenAIBlockingUsage) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":13,"completion_tokens":4}})",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 13U);
+  EXPECT_EQ(result.value().usage->output_tokens, 4U);
+  EXPECT_FALSE(result.value().usage->cache_read_input_tokens);
+}
+
+TEST(ClientTest, PreservesZeroAsKnownTokenUsage) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0}})",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::OpenAICompatible),
+                     std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  ASSERT_TRUE(result.value().usage->input_tokens);
+  ASSERT_TRUE(result.value().usage->output_tokens);
+  EXPECT_EQ(*result.value().usage->input_tokens, 0U);
+  EXPECT_EQ(*result.value().usage->output_tokens, 0U);
 }
 
 TEST(ClientTest, SerializesOpenAIProviderOptionsAndCustomApiKeyHeader) {
@@ -763,6 +820,22 @@ TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
                            }));
 }
 
+TEST(ClientTest, ParsesOllamaBlockingUsage) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"message":{"role":"assistant","content":"ok"},"done":true,"prompt_eval_count":15,"eval_count":6})",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+
+  const auto result = client.send(test_request());
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 15U);
+  EXPECT_EQ(result.value().usage->output_tokens, 6U);
+}
+
 TEST(ClientTest, SerializesOllamaSamplingParameters) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200, R"({"message":{"content":"ok"}})", {}, {}}});
@@ -846,6 +919,7 @@ TEST(ClientTest, StreamsNativeOllamaNdjsonTextAndToolCalls) {
       });
 
   ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
   EXPECT_EQ(streamed_text, "Hello world");
   ASSERT_EQ(result.value().content.size(), 2U);
   EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text, "Hello world");
@@ -857,6 +931,26 @@ TEST(ClientTest, StreamsNativeOllamaNdjsonTextAndToolCalls) {
   const auto sent = nlohmann::json::parse(observed->bodies[0]);
   EXPECT_TRUE(sent["stream"].get<bool>());
   EXPECT_EQ(observed->request_headers[0].back().second, "application/x-ndjson");
+}
+
+TEST(ClientTest, ParsesOllamaStreamingUsageFromFinalChunkOnly) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       "{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},"
+       "\"done\":false,\"prompt_eval_count\":99,\"eval_count\":99}\n"
+       "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+       "\"done\":true,\"prompt_eval_count\":17,\"eval_count\":8}\n",
+       {},
+       {}}});
+  xoi::Client client(test_config(xoi::Provider::Ollama), std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 17U);
+  EXPECT_EQ(result.value().usage->output_tokens, 8U);
 }
 
 TEST(ClientTest, RejectsMalformedOllamaNdjson) {
@@ -944,6 +1038,7 @@ TEST(ClientTest, StreamsAnthropicTextAcrossTransportChunkBoundaries) {
       [&streamed_text](std::string_view text) { streamed_text.append(text); });
 
   ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
   EXPECT_EQ(streamed_text, "Hello world");
   ASSERT_EQ(result.value().content.size(), 1U);
   EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text, "Hello world");
@@ -956,6 +1051,33 @@ TEST(ClientTest, StreamsAnthropicTextAcrossTransportChunkBoundaries) {
                                      std::string("text/event-stream"))),
             observed->request_headers[0].end());
   EXPECT_EQ(observed->urls[0], "https://anthropic.test/v1/messages");
+}
+
+TEST(ClientTest, ParsesAnthropicStreamingUsageAsLatestCumulativeValues) {
+  const std::string events =
+      "event: message_start\n"
+      "data: {\"type\":\"message_start\",\"message\":{\"usage\":{"
+      "\"input_tokens\":10,\"cache_read_input_tokens\":2,"
+      "\"cache_creation_input_tokens\":1}}}\n\n"
+      "event: message_delta\n"
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":"
+      "\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+      "event: message_delta\n"
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":"
+      "\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\n";
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, events, {}, {}}});
+  xoi::Client client(test_config(), std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 10U);
+  EXPECT_EQ(result.value().usage->output_tokens, 8U);
+  EXPECT_EQ(result.value().usage->cache_read_input_tokens, 2U);
+  EXPECT_EQ(result.value().usage->cache_creation_input_tokens, 1U);
 }
 
 TEST(ClientTest, StreamsAnthropicToolCalls) {
@@ -1036,7 +1158,51 @@ TEST(ClientTest, StreamsOpenAITextAndAssemblesToolCalls) {
   EXPECT_EQ(result.value().stop_reason, "tool_calls");
   const auto sent = nlohmann::json::parse(observed->bodies[0]);
   EXPECT_TRUE(sent["stream"].get<bool>());
+  EXPECT_FALSE(sent.contains("stream_options"));
   EXPECT_EQ(observed->urls[0], "https://openai.test/v1/chat/completions");
+  EXPECT_FALSE(result.value().usage);
+}
+
+TEST(ClientTest, RequestsAndParsesOpenAIStreamingUsageWhenEnabled) {
+  const std::string events =
+      "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+      "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,"
+      "\"completion_tokens\":5}}\n\n"
+      "data: [DONE]\n\n";
+  auto mock = std::make_unique<MockTransport>(
+      std::vector<xoi::HttpResponse>{{200, events, {}, {}}});
+  auto *observed = mock.get();
+  auto config = test_config(xoi::Provider::OpenAICompatible);
+  config.openai_stream_include_usage = true;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().usage);
+  EXPECT_EQ(result.value().usage->input_tokens, 21U);
+  EXPECT_EQ(result.value().usage->output_tokens, 5U);
+  const auto sent = nlohmann::json::parse(observed->bodies[0]);
+  EXPECT_EQ(sent["stream_options"]["include_usage"], true);
+}
+
+TEST(ClientTest, AcceptsOpenAIStreamWithoutRequestedUsage) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+       "data: [DONE]\n\n",
+       {},
+       {}}});
+  auto config = test_config(xoi::Provider::OpenAICompatible);
+  config.openai_stream_include_usage = true;
+  xoi::Client client(config, std::move(mock));
+
+  const auto result =
+      client.send_stream(test_request(), [](std::string_view) {});
+
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
 }
 
 TEST(ClientTest, ReportsStreamingCallbackExceptions) {
@@ -1394,11 +1560,11 @@ TEST(ClientTest, ConvertsToolResultsForOpenAICompatibleRequests) {
 TEST(AgentTest, ExecutesToolsAndSendsResultsBackToTheModel) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
-       R"({"content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"path":"README.md"}}],"stop_reason":"tool_use"})",
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"path":"README.md"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":3}})",
        {},
        {}},
       {200,
-       R"({"content":[{"type":"text","text":"The file says hello."}],"stop_reason":"end_turn"})",
+       R"({"content":[{"type":"text","text":"The file says hello."}],"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":4}})",
        {},
        {}}});
   auto *observed = mock.get();
@@ -1416,17 +1582,60 @@ TEST(AgentTest, ExecutesToolsAndSendsResultsBackToTheModel) {
                })
           .empty());
 
-  const auto result = xoi::run_agent(client, test_request(), tools);
+  std::vector<xoi::AgentEvent> events;
+  xoi::AgentOptions options;
+  options.on_event = [&events](const xoi::AgentEvent &event) {
+    events.push_back(event);
+  };
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
 
   ASSERT_TRUE(result);
   EXPECT_EQ(result.value().text, "The file says hello.");
   EXPECT_EQ(result.value().steps, 2);
   EXPECT_EQ(result.value().tool_calls, 1);
+  EXPECT_EQ(result.value().usage.input_tokens, 30U);
+  EXPECT_EQ(result.value().usage.output_tokens, 7U);
+  ASSERT_EQ(events.size(), 6U);
+  ASSERT_TRUE(events[1].usage);
+  EXPECT_EQ(events[1].usage->input_tokens, 10U);
+  ASSERT_TRUE(events[5].usage);
+  EXPECT_EQ(events[5].usage->output_tokens, 4U);
   const auto follow_up = nlohmann::json::parse(observed->bodies[1]);
   EXPECT_EQ(follow_up["messages"][1]["content"][0]["type"], "tool_use");
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["type"], "tool_result");
   EXPECT_EQ(follow_up["messages"][2]["content"][0]["content"],
             "contents of README.md");
+}
+
+TEST(AgentTest, LeavesAgentUsageUnknownWhenAnyTurnOmitsIt) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"noop","input":{}}],"usage":{"input_tokens":9,"output_tokens":2}})",
+       {},
+       {}},
+      {200, R"({"content":[{"type":"text","text":"done"}]})", {}, {}}});
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  EXPECT_TRUE(tools
+                  .add({"noop", "No operation", {{"type", "object"}}},
+                       [](const nlohmann::json &) {
+                         return xoi::Result<std::string>("done");
+                       })
+                  .empty());
+  std::vector<xoi::AgentEvent> events;
+  xoi::AgentOptions options;
+  options.on_event = [&events](const xoi::AgentEvent &event) {
+    events.push_back(event);
+  };
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage.input_tokens);
+  EXPECT_FALSE(result.value().usage.output_tokens);
+  ASSERT_EQ(events.size(), 6U);
+  ASSERT_TRUE(events[1].usage);
+  EXPECT_FALSE(events[5].usage);
 }
 
 TEST(ToolRegistryTest, DecodesTypedArgumentsAfterSchemaValidation) {

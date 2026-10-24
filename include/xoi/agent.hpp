@@ -174,6 +174,8 @@ struct AgentEvent {
   int step = 0;
   std::string tool_name;
   bool is_error = false;
+  /// Usage reported for this model response; absent when unavailable.
+  std::optional<Usage> usage;
 };
 
 /// Bounds an agent run and optionally observes progress and cancellation.
@@ -192,6 +194,9 @@ struct AgentResponse {
   std::string stop_reason;
   int steps = 0;
   int tool_calls = 0;
+  /// Per-field totals across model turns. A count is unknown if any turn
+  /// omitted that count.
+  Usage usage;
 };
 
 /// Runs a blocking tool-call conversation using the supplied registry.
