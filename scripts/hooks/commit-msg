@@ -9,9 +9,9 @@ if ! awk '
   NR == 2 && $0 == "" { next }
   NR == 3 && $0 ~ /^Co-authored-by: .+ <[^<>[:space:]]+>$/ { next }
   { exit 1 }
-  END { if (NR != 1 && NR != 3) exit 1 }
+  END { if (NR != 3) exit 1 }
 ' "$message_file"; then
-  echo "error: commit message must have one subject and an optional co-author trailer" >&2
+  echo "error: commit message must have one subject and exactly one co-author trailer" >&2
   exit 1
 fi
 
