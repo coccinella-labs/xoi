@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <variant>
 #include <vector>
@@ -62,6 +63,8 @@ struct Request {
   int max_tokens = 1024;
   std::optional<double> temperature;
   std::optional<double> top_p;
+  /// Optional cancellation signal for the provider request.
+  std::stop_token stop_token;
 };
 
 /// A parsed response from an LLM provider.

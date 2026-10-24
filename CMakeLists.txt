@@ -6,7 +6,7 @@ include(CMakePackageConfigHelpers)
 include(CTest)
 include(FetchContent)
 
-find_package(CURL REQUIRED)
+find_package(CURL 7.68 REQUIRED)
 
 option(XOI_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(XOI_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)

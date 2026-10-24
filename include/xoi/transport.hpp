@@ -5,6 +5,7 @@
 #include <exception>
 #include <functional>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,6 +39,7 @@ struct HttpResponse {
   bool response_callback_failed = false;
   TransportFailure transport_failure = TransportFailure::None;
   std::size_t response_bytes_received = 0;
+  bool cancelled = false;
 
   /// Returns a response header value using case-insensitive name matching.
   std::string header(const std::string &name) const;
@@ -53,6 +55,22 @@ public:
   post(const std::string &url, const std::string &body,
        const std::vector<std::pair<std::string, std::string>> &headers,
        int timeout_sec, std::size_t max_response_bytes) = 0;
+  /// Sends one POST with cooperative cancellation. Legacy transports remain
+  /// compatible, but can only observe cancellation after their blocking call.
+  virtual HttpResponse
+  post(const std::string &url, const std::string &body,
+       const std::vector<std::pair<std::string, std::string>> &headers,
+       int timeout_sec, std::size_t max_response_bytes,
+       const std::stop_token &stop_token) {
+    if (stop_token.stop_requested()) {
+      HttpResponse response;
+      response.cancelled = true;
+      return response;
+    }
+    auto response = post(url, body, headers, timeout_sec, max_response_bytes);
+    response.cancelled = response.cancelled || stop_token.stop_requested();
+    return response;
+  }
   /// Sends a POST and forwards successful response chunks as they arrive.
   /// Transports that do not support incremental delivery may use this
   /// compatibility implementation.
@@ -83,6 +101,24 @@ public:
     }
     return response;
   }
+  /// Streams one POST with cooperative cancellation. Legacy transports remain
+  /// compatible, but can only observe cancellation after their blocking call.
+  virtual HttpResponse
+  post_stream(const std::string &url, const std::string &body,
+              const std::vector<std::pair<std::string, std::string>> &headers,
+              int timeout_sec, std::size_t max_response_bytes,
+              const StreamChunkHandler &on_chunk,
+              const std::stop_token &stop_token) {
+    if (stop_token.stop_requested()) {
+      HttpResponse response;
+      response.cancelled = true;
+      return response;
+    }
+    auto response = post_stream(url, body, headers, timeout_sec,
+                                max_response_bytes, on_chunk);
+    response.cancelled = response.cancelled || stop_token.stop_requested();
+    return response;
+  }
 };
 
 /// The default libcurl-backed HTTP transport.
@@ -97,10 +133,21 @@ public:
        const std::vector<std::pair<std::string, std::string>> &headers,
        int timeout_sec, std::size_t max_response_bytes) override;
   HttpResponse
+  post(const std::string &url, const std::string &body,
+       const std::vector<std::pair<std::string, std::string>> &headers,
+       int timeout_sec, std::size_t max_response_bytes,
+       const std::stop_token &stop_token) override;
+  HttpResponse
   post_stream(const std::string &url, const std::string &body,
               const std::vector<std::pair<std::string, std::string>> &headers,
               int timeout_sec, std::size_t max_response_bytes,
               const StreamChunkHandler &on_chunk) override;
+  HttpResponse
+  post_stream(const std::string &url, const std::string &body,
+              const std::vector<std::pair<std::string, std::string>> &headers,
+              int timeout_sec, std::size_t max_response_bytes,
+              const StreamChunkHandler &on_chunk,
+              const std::stop_token &stop_token) override;
 
 private:
   std::optional<std::string> proxy_url_;
