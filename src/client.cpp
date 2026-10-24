@@ -72,6 +72,68 @@ Error protocol_error(std::string message) {
   return {ErrorKind::Protocol, std::move(message), 0, false};
 }
 
+std::optional<std::uint64_t> usage_count(const nlohmann::json &usage,
+                                         std::string_view name) {
+  const auto value = usage.find(name);
+  if (value == usage.end())
+    return std::nullopt;
+  if (value->is_number_unsigned())
+    return value->get<std::uint64_t>();
+  if (value->is_number_integer() && value->get<std::int64_t>() >= 0)
+    return static_cast<std::uint64_t>(value->get<std::int64_t>());
+  throw nlohmann::json::type_error::create(
+      302,
+      "usage count '" + std::string(name) + "' must be a non-negative integer",
+      &usage);
+}
+
+Usage parse_named_usage(const nlohmann::json &values,
+                        std::string_view input_name,
+                        std::string_view output_name,
+                        std::string_view cache_read_name = {},
+                        std::string_view cache_creation_name = {}) {
+  if (!values.is_object())
+    throw nlohmann::json::type_error::create(302, "usage must be an object",
+                                             &values);
+  return Usage{
+      usage_count(values, input_name), usage_count(values, output_name),
+      cache_read_name.empty() ? std::nullopt
+                              : usage_count(values, cache_read_name),
+      cache_creation_name.empty() ? std::nullopt
+                                  : usage_count(values, cache_creation_name)};
+}
+
+std::optional<Usage> parse_usage(const nlohmann::json &body,
+                                 std::string_view input_name,
+                                 std::string_view output_name,
+                                 std::string_view cache_read_name = {},
+                                 std::string_view cache_creation_name = {}) {
+  const auto usage = body.find("usage");
+  if (usage == body.end() || usage->is_null())
+    return std::nullopt;
+  if (!usage->is_object())
+    throw nlohmann::json::type_error::create(302, "usage must be an object",
+                                             &body);
+  return parse_named_usage(*usage, input_name, output_name, cache_read_name,
+                           cache_creation_name);
+}
+
+void merge_usage(std::optional<Usage> &target,
+                 const std::optional<Usage> &update) {
+  if (!update)
+    return;
+  if (!target)
+    target = Usage{};
+  if (update->input_tokens)
+    target->input_tokens = update->input_tokens;
+  if (update->output_tokens)
+    target->output_tokens = update->output_tokens;
+  if (update->cache_read_input_tokens)
+    target->cache_read_input_tokens = update->cache_read_input_tokens;
+  if (update->cache_creation_input_tokens)
+    target->cache_creation_input_tokens = update->cache_creation_input_tokens;
+}
+
 bool valid_header_name(const std::string &name) {
   if (name.empty())
     return false;
@@ -152,7 +214,8 @@ nlohmann::json anthropic_request_json(const Request &request, bool streaming) {
 
 nlohmann::json
 openai_request_json(const Request &request, bool streaming,
-                    OpenAITokenLimitParameter token_limit_parameter) {
+                    OpenAITokenLimitParameter token_limit_parameter,
+                    bool include_stream_usage) {
   nlohmann::json messages = nlohmann::json::array();
   if (!request.system.empty())
     messages.push_back({{"role", "system"}, {"content", request.system}});
@@ -218,6 +281,8 @@ openai_request_json(const Request &request, bool streaming,
   }
   if (streaming)
     body["stream"] = true;
+  if (streaming && include_stream_usage)
+    body["stream_options"] = {{"include_usage", true}};
   return body;
 }
 
@@ -292,6 +357,9 @@ Response parse_anthropic_response(const nlohmann::json &body) {
                                              &body);
   Response response;
   response.stop_reason = body.value("stop_reason", "");
+  response.usage =
+      parse_usage(body, "input_tokens", "output_tokens",
+                  "cache_read_input_tokens", "cache_creation_input_tokens");
   for (const auto &block : body["content"]) {
     const std::string type = block.value("type", "");
     if (type == "text") {
@@ -323,6 +391,7 @@ Response parse_openai_response(const nlohmann::json &body) {
   const auto &message = choice["message"];
   Response response;
   response.stop_reason = choice.value("finish_reason", "");
+  response.usage = parse_usage(body, "prompt_tokens", "completion_tokens");
   if (message.contains("content") && message["content"].is_string()) {
     response.content.push_back({Text{message["content"].get<std::string>()}});
   }
@@ -348,6 +417,8 @@ Response parse_ollama_response(const nlohmann::json &body) {
   const auto &message = body["message"];
   Response response;
   response.stop_reason = body.value("done_reason", "");
+  if (body.contains("prompt_eval_count") || body.contains("eval_count"))
+    response.usage = parse_named_usage(body, "prompt_eval_count", "eval_count");
   if (message.contains("content") && message["content"].is_string()) {
     response.content.push_back({Text{message["content"].get<std::string>()}});
   }
@@ -426,6 +497,7 @@ public:
       return protocol_error("stream response contained no events");
     Response result;
     result.stop_reason = stop_reason_;
+    result.usage = usage_;
     for (const auto &[index, block] : blocks_) {
       (void)index;
       if (const auto *text = std::get_if<std::string>(&block)) {
@@ -595,19 +667,33 @@ private:
       }
     } else if (type == "message_delta" && event.contains("delta") &&
                event["delta"].is_object()) {
-      const auto &reason = event["delta"]["stop_reason"];
-      if (reason.is_string())
-        stop_reason_ = reason.get<std::string>();
+      if (event.contains("usage") && !event["usage"].is_null())
+        merge_usage(usage_, parse_named_usage(event["usage"], "input_tokens",
+                                              "output_tokens",
+                                              "cache_read_input_tokens",
+                                              "cache_creation_input_tokens"));
+      const auto reason = event["delta"].find("stop_reason");
+      if (reason != event["delta"].end() && reason->is_string())
+        stop_reason_ = reason->get<std::string>();
     } else if (type == "message_start") {
       if (event.contains("message") && event["message"].is_object()) {
-        const auto &reason = event["message"]["stop_reason"];
-        if (reason.is_string())
-          stop_reason_ = reason.get<std::string>();
+        if (event["message"].contains("usage") &&
+            !event["message"]["usage"].is_null())
+          merge_usage(usage_, parse_named_usage(event["message"]["usage"],
+                                                "input_tokens", "output_tokens",
+                                                "cache_read_input_tokens",
+                                                "cache_creation_input_tokens"));
+        const auto reason = event["message"].find("stop_reason");
+        if (reason != event["message"].end() && reason->is_string())
+          stop_reason_ = reason->get<std::string>();
       }
     }
   }
 
   void process_openai_event(const nlohmann::json &event) {
+    if (event.contains("usage") && !event["usage"].is_null())
+      usage_ = parse_named_usage(event["usage"], "prompt_tokens",
+                                 "completion_tokens");
     if (!event.contains("choices"))
       return;
     if (!event["choices"].is_array()) {
@@ -662,6 +748,7 @@ private:
   std::string event_;
   std::string stop_reason_;
   std::string error_;
+  std::optional<Usage> usage_;
   std::exception_ptr callback_exception_;
   bool saw_event_ = false;
   std::map<std::size_t, StreamBlock> blocks_;
@@ -708,6 +795,7 @@ public:
       return protocol_error("stream response contained no events");
     Response response;
     response.stop_reason = stop_reason_;
+    response.usage = usage_;
     if (!text_.empty())
       response.content.push_back({Text{text_}});
     for (std::size_t index = 0; index < tools_.size(); ++index) {
@@ -752,6 +840,9 @@ private:
     }
     if (event.contains("done_reason") && event["done_reason"].is_string())
       stop_reason_ = event["done_reason"].get<std::string>();
+    if (event.value("done", false) &&
+        (event.contains("prompt_eval_count") || event.contains("eval_count")))
+      usage_ = parse_named_usage(event, "prompt_eval_count", "eval_count");
     if (!event.contains("message"))
       return;
     if (!event["message"].is_object()) {
@@ -804,6 +895,7 @@ private:
   std::string text_;
   std::string stop_reason_;
   std::string error_;
+  std::optional<Usage> usage_;
   std::exception_ptr callback_exception_;
   bool saw_event_ = false;
   std::vector<StreamTool> tools_;
@@ -927,7 +1019,8 @@ Result<Response> Client::send_impl(
           ? ollama_request_json(request, on_text_delta != nullptr,
                                 config_.ollama_send_num_predict)
           : openai_request_json(request, on_text_delta != nullptr,
-                                config_.openai_token_limit_parameter);
+                                config_.openai_token_limit_parameter,
+                                config_.openai_stream_include_usage);
   std::vector<std::pair<std::string, std::string>> headers{
       {"Content-Type", "application/json"}};
   if (on_text_delta)

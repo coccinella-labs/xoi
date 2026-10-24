@@ -85,6 +85,9 @@ struct Config {
   std::optional<std::string> proxy_url;
   OpenAITokenLimitParameter openai_token_limit_parameter =
       OpenAITokenLimitParameter::MaxTokens;
+  /// Request usage in OpenAI-compatible streams; disabled by default because
+  /// some compatible servers reject stream_options.include_usage.
+  bool openai_stream_include_usage = false;
   /// Send num_predict from max_tokens; false leaves the limit to Ollama.
   bool ollama_send_num_predict = true;
   int timeout_sec = 60;
@@ -106,7 +109,8 @@ public:
   /// Creates a client with an optional custom transport.
   explicit Client(Config config,
                   std::unique_ptr<Transport> transport = nullptr);
-  /// Sends a request and returns a response or a typed error.
+  /// Sends a request and returns a response or a typed error, including
+  /// provider-reported token usage when available.
   Result<Response> send(const Request &request) const;
   /// Sends a streaming request, reporting each text delta as it arrives.
   /// The string view is valid only during the callback. Tool calls are

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -240,6 +241,23 @@ std::string final_text(const std::vector<Block> &blocks) {
   return text;
 }
 
+void accumulate_count(std::optional<std::uint64_t> &total, bool &complete,
+                      const std::optional<std::uint64_t> &count) {
+  if (!count || !complete) {
+    complete = false;
+    total.reset();
+    return;
+  }
+  if (!total)
+    total = 0;
+  if (*total > (std::numeric_limits<std::uint64_t>::max)() - *count) {
+    complete = false;
+    total.reset();
+    return;
+  }
+  *total += *count;
+}
+
 } // namespace
 
 std::string ToolRegistry::add(ToolSpec spec, ToolHandler handler) {
@@ -303,6 +321,10 @@ Result<AgentResponse> run_agent(Client &client, Request request,
   request.stop_token = stop_token;
   request.tools = tools.specs();
   AgentResponse result;
+  bool input_usage_complete = true;
+  bool output_usage_complete = true;
+  bool cache_read_usage_complete = true;
+  bool cache_creation_usage_complete = true;
   std::map<std::string, std::pair<std::string, bool>> previous_results;
   std::map<std::string, int> repeat_counts;
   const auto cancelled = [] {
@@ -329,8 +351,11 @@ Result<AgentResponse> run_agent(Client &client, Request request,
   for (int step = 0; step < options.max_steps; ++step) {
     if (stop_token.stop_requested())
       return cancelled();
-    if (const auto error =
-            notify({AgentEventKind::ModelRequestStarted, step + 1, {}, false}))
+    if (const auto error = notify({AgentEventKind::ModelRequestStarted,
+                                   step + 1,
+                                   {},
+                                   false,
+                                   std::nullopt}))
       return *error;
     if (stop_token.stop_requested())
       return cancelled();
@@ -338,9 +363,23 @@ Result<AgentResponse> run_agent(Client &client, Request request,
     if (!response)
       return response.error();
     ++result.steps;
+    const auto &turn_usage = response.value().usage;
+    accumulate_count(result.usage.input_tokens, input_usage_complete,
+                     turn_usage ? turn_usage->input_tokens : std::nullopt);
+    accumulate_count(result.usage.output_tokens, output_usage_complete,
+                     turn_usage ? turn_usage->output_tokens : std::nullopt);
+    accumulate_count(
+        result.usage.cache_read_input_tokens, cache_read_usage_complete,
+        turn_usage ? turn_usage->cache_read_input_tokens : std::nullopt);
+    accumulate_count(
+        result.usage.cache_creation_input_tokens, cache_creation_usage_complete,
+        turn_usage ? turn_usage->cache_creation_input_tokens : std::nullopt);
     request.messages.push_back({"assistant", response.value().content});
-    if (const auto error = notify(
-            {AgentEventKind::ModelResponseReceived, step + 1, {}, false}))
+    if (const auto error = notify({AgentEventKind::ModelResponseReceived,
+                                   step + 1,
+                                   {},
+                                   false,
+                                   turn_usage}))
       return *error;
     if (stop_token.stop_requested())
       return cancelled();
@@ -384,7 +423,7 @@ Result<AgentResponse> run_agent(Client &client, Request request,
       if (previous != previous_results.end()) {
         if (const auto error =
                 notify({AgentEventKind::ToolCallRepeated, step + 1, call->name,
-                        previous->second.second}))
+                        previous->second.second, std::nullopt}))
           return *error;
         if (stop_token.stop_requested())
           return cancelled();
@@ -398,8 +437,9 @@ Result<AgentResponse> run_agent(Client &client, Request request,
                             "arguments.",
                         previous->second.second}});
       } else {
-        if (const auto error = notify({AgentEventKind::ToolExecutionStarted,
-                                       step + 1, call->name, false}))
+        if (const auto error =
+                notify({AgentEventKind::ToolExecutionStarted, step + 1,
+                        call->name, false, std::nullopt}))
           return *error;
         if (stop_token.stop_requested())
           return cancelled();
@@ -418,8 +458,9 @@ Result<AgentResponse> run_agent(Client &client, Request request,
           tool_results.push_back(
               {ToolResult{call->id, tool_result.error().message, true}});
         }
-        if (const auto error = notify({AgentEventKind::ToolExecutionCompleted,
-                                       step + 1, call->name, is_error}))
+        if (const auto error =
+                notify({AgentEventKind::ToolExecutionCompleted, step + 1,
+                        call->name, is_error, std::nullopt}))
           return *error;
         if (stop_token.stop_requested())
           return cancelled();
