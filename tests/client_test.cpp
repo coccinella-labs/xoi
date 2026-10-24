@@ -793,6 +793,7 @@ TEST(ClientTest, SerializesAndParsesNativeOllamaChat) {
   const auto result = client.send(request);
 
   ASSERT_TRUE(result);
+  EXPECT_FALSE(result.value().usage);
   ASSERT_EQ(result.value().content.size(), 2U);
   EXPECT_EQ(std::get<xoi::Text>(result.value().content[0]).text,
             "Reading file");
