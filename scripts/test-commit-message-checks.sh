@@ -33,6 +33,11 @@ Co-authored-by: Example <example@example.com>
 '
 expect_hook_result rejected 'missing co-author trailer' 'Add one check (#14)
 '
+expect_hook_result rejected 'duplicate co-author trailers' 'Add one check (#14)
+
+Co-authored-by: One <one@example.com>
+Co-authored-by: Two <two@example.com>
+'
 expect_hook_result rejected 'missing issue number' 'Missing issue suffix
 '
 expect_hook_result rejected 'overlong subject' 'This subject is deliberately much too long to pass the seventy two character limit (#14)
@@ -99,6 +104,10 @@ Details
 Co-authored-by: Example <example@example.com>' \
   'Add check (#14)
 Co-authored-by: Example <example@example.com>' \
+  'Add check (#14)
+
+Co-authored-by: One <one@example.com>
+Co-authored-by: Two <two@example.com>' \
   'Add check (#14)
 
 Co-authored-by: Example' \
