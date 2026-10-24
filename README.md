@@ -37,6 +37,15 @@ Requests can set optional `temperature` and `top_p` sampling values in
 `Config::ollama_send_num_predict` to `false` to let the server choose its
 default prediction limit.
 
+Responses expose provider-reported input and output token counts as optional
+usage values; missing counts remain unknown, and xoi does not estimate cost.
+Anthropic responses may also report cache-read and cache-creation input tokens.
+OpenAI-compatible streaming usage is opt-in through
+`Config::openai_stream_include_usage` (default `false`) because some compatible
+servers reject `stream_options.include_usage`. Agent progress reports usage per
+model turn, and the final agent response aggregates it; unavailable turn
+counts remain unknown rather than being silently omitted from the sum.
+
 ## Build
 
 Requires CMake 3.20 and libcurl 7.68 or newer.
