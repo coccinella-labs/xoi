@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace xoi {
 
@@ -33,6 +34,9 @@ struct Error {
   int status = 0;
   bool retryable = false;
   TransportFailure transport_failure = TransportFailure::None;
+  /// Conversation available when run_agent is cancelled; tool uses without
+  /// results are completed with synthetic error results.
+  std::optional<std::vector<Message>> partial_history = std::nullopt;
 };
 
 /// Selects the completion-token field used by OpenAI-compatible APIs.

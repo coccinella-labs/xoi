@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <utility>
 
@@ -269,6 +270,39 @@ void accumulate_count(std::optional<std::uint64_t> &total, bool &complete,
   *total += *count;
 }
 
+Error cancelled_error(std::vector<Message> &history,
+                      std::string_view partial_text) {
+  if (!partial_text.empty())
+    history.push_back({"assistant", {Text{std::string(partial_text)}}});
+
+  std::set<std::string> outstanding;
+  std::vector<std::string> tool_use_ids;
+  for (const auto &message : history) {
+    for (const auto &block : message.content) {
+      if (const auto *tool_use = std::get_if<ToolUse>(&block)) {
+        if (outstanding.insert(tool_use->id).second)
+          tool_use_ids.push_back(tool_use->id);
+      } else if (const auto *tool_result = std::get_if<ToolResult>(&block)) {
+        outstanding.erase(tool_result->tool_use_id);
+      }
+    }
+  }
+
+  if (!outstanding.empty()) {
+    if (history.empty() || history.back().role != "user")
+      history.push_back({"user", {}});
+    auto &results = history.back().content;
+    for (const auto &id : tool_use_ids) {
+      if (outstanding.contains(id))
+        results.push_back({ToolResult{id, "cancelled", true}});
+    }
+  }
+
+  Error error{ErrorKind::Cancelled, "agent run cancelled", 0, false};
+  error.partial_history = history;
+  return error;
+}
+
 } // namespace
 
 std::string ToolRegistry::add(ToolSpec spec, ToolHandler handler) {
@@ -336,10 +370,11 @@ Result<AgentResponse> run_agent(Client &client, Request request,
   bool output_usage_complete = true;
   bool cache_read_usage_complete = true;
   bool cache_creation_usage_complete = true;
+  std::string partial_text;
   std::map<std::string, std::pair<std::string, bool>> previous_results;
   std::map<std::string, int> repeat_counts;
-  const auto cancelled = [] {
-    return Error{ErrorKind::Cancelled, "agent run cancelled", 0, false};
+  const auto cancelled = [&request, &partial_text] {
+    return cancelled_error(request.messages, partial_text);
   };
   const auto notify =
       [&options](const AgentEvent &event) -> std::optional<Error> {
@@ -370,9 +405,21 @@ Result<AgentResponse> run_agent(Client &client, Request request,
       return *error;
     if (stop_token.stop_requested())
       return cancelled();
-    auto response = client.send(request);
-    if (!response)
+    partial_text.clear();
+    auto response = options.on_text_delta
+                        ? client.send_stream(request,
+                                             [&](std::string_view delta) {
+                                               partial_text.append(delta);
+                                               options.on_text_delta(delta);
+                                             })
+                        : client.send(request);
+    if (!response) {
+      if (response.error().kind == ErrorKind::Cancelled ||
+          stop_token.stop_requested())
+        return cancelled();
       return response.error();
+    }
+    partial_text.clear();
     ++result.steps;
     const auto &turn_usage = response.value().usage;
     accumulate_count(result.usage.input_tokens, input_usage_complete,
@@ -395,7 +442,6 @@ Result<AgentResponse> run_agent(Client &client, Request request,
     if (stop_token.stop_requested())
       return cancelled();
 
-    std::vector<Block> tool_results;
     std::vector<const ToolUse *> calls;
     for (const auto &block : response.value().content) {
       const auto *call = std::get_if<ToolUse>(&block);
@@ -425,6 +471,8 @@ Result<AgentResponse> run_agent(Client &client, Request request,
                      false};
     }
 
+    request.messages.push_back({"user", {}});
+    auto &tool_results = request.messages.back().content;
     for (const ToolUse *call : calls) {
       if (stop_token.stop_requested())
         return cancelled();
@@ -477,7 +525,6 @@ Result<AgentResponse> run_agent(Client &client, Request request,
           return cancelled();
       }
     }
-    request.messages.push_back({"user", std::move(tool_results)});
   }
   return Error{ErrorKind::Limit, "agent step limit reached", 0, false};
 }

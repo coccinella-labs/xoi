@@ -77,10 +77,13 @@ with the final response.
 
 `run_agent` can observe model/tool lifecycle progress and accepts a
 `std::stop_token` for cancellation. `Client::send` and `Client::send_stream`
-use the token on `xoi::Request`; `CurlTransport` interrupts an active request,
-and text deltas delivered before cancellation remain available through the
-stream callback. Legacy custom transports remain source-compatible but can
-only observe cancellation after their blocking call unless they override the
+use the token on `xoi::Request`; `CurlTransport` interrupts an active request.
+Agent turns remain blocking by default; set `AgentOptions::on_text_delta` to
+receive streamed text. A cancelled agent run returns `Error::partial_history`,
+including partial streamed assistant text and synthetic error tool results
+(`cancelled`) for every unfinished tool call, so callers can resume with that
+history. Legacy custom transports remain source-compatible but can only
+observe cancellation after their blocking call unless they override the
 token-aware transport methods. Existing tool handlers remain supported;
 token-aware handlers can receive the stop token and must cooperate to stop
 work already in progress. Progress events include tool names, but not tool

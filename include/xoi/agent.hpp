@@ -178,7 +178,8 @@ struct AgentEvent {
   std::optional<Usage> usage;
 };
 
-/// Bounds an agent run and optionally observes progress and cancellation.
+/// Bounds an agent run and optionally observes progress, text, and
+/// cancellation.
 struct AgentOptions {
   int max_steps = 8;
   int max_tool_calls = 32;
@@ -186,6 +187,9 @@ struct AgentOptions {
   /// Cancels provider requests and is passed to token-aware tool handlers.
   std::stop_token stop_token;
   std::function<void(const AgentEvent &)> on_event;
+  /// Receives streamed text deltas. When set, model turns use send_stream;
+  /// partial text is included in Error::partial_history on cancellation.
+  std::function<void(std::string_view)> on_text_delta;
 };
 
 /// Summarizes a completed agent run.
@@ -201,7 +205,8 @@ struct AgentResponse {
 
 /// Runs a blocking tool-call conversation using the supplied registry.
 /// Cancellation interrupts CurlTransport requests and is checked between
-/// model requests and tool calls. Token-aware tool handlers must cooperate.
+/// model requests and tool calls. Cancelled errors contain resumable history;
+/// token-aware tool handlers must cooperate.
 Result<AgentResponse> run_agent(Client &client, Request request,
                                 const ToolRegistry &tools,
                                 AgentOptions options = {});
