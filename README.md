@@ -54,6 +54,13 @@ Requires CMake 3.20 and libcurl 7.68 or newer.
 cmake -S . -B build && cmake --build build
 ```
 
+To consume an installed package:
+
+```cmake
+find_package(xoi 0.2.0 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE xoi::xoi)
+```
+
 With Ollama running locally and a model available, try the streaming example:
 
 ```sh
