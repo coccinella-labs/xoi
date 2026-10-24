@@ -2012,6 +2012,46 @@ TEST(ToolRegistryTest, RejectsMalformedOrUnsupportedSchemaKeywords) {
   EXPECT_TRUE(tools.specs().empty());
 }
 
+TEST(ToolRegistryTest, RejectsContradictorySchemaBoundsAtRegistration) {
+  xoi::ToolRegistry tools;
+  const auto handler = [](const nlohmann::json &) {
+    return xoi::Result<std::string>(std::string{"unused"});
+  };
+
+  EXPECT_EQ(
+      tools.add({"bad_numeric_bounds",
+                 "Bad numeric bounds",
+                 {{"type", "object"},
+                  {"properties",
+                   {{"value",
+                     {{"type", "number"}, {"minimum", 5}, {"maximum", 2}}}}}}},
+                handler),
+      "tool input schema.properties.value minimum must not exceed "
+      "maximum");
+  EXPECT_EQ(
+      tools.add(
+          {"bad_length_bounds",
+           "Bad length bounds",
+           {{"type", "object"},
+            {"properties",
+             {{"name",
+               {{"type", "string"}, {"minLength", 5}, {"maxLength", 2}}}}}}},
+          handler),
+      "tool input schema.properties.name minLength must not exceed "
+      "maxLength");
+  EXPECT_EQ(
+      tools.add({"bad_item_bounds",
+                 "Bad item bounds",
+                 {{"type", "object"},
+                  {"properties",
+                   {{"values",
+                     {{"type", "array"}, {"minItems", 5}, {"maxItems", 2}}}}}}},
+                handler),
+      "tool input schema.properties.values minItems must not exceed "
+      "maxItems");
+  EXPECT_TRUE(tools.specs().empty());
+}
+
 TEST(AgentTest, ReturnsTypedDeserializationErrorsToTheModel) {
   auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
       {200,
