@@ -1380,6 +1380,22 @@ TEST(ClientTest, CancelsTokenAwareNonStreamingTransport) {
   EXPECT_EQ(observed->calls(), 1);
 }
 
+TEST(ClientTest, PreStoppedRequestIsCancelledWithoutSending) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  std::stop_source stop_source;
+  stop_source.request_stop();
+  auto request = test_request();
+  request.stop_token = stop_source.get_token();
+
+  const auto result = client.send(request);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  EXPECT_EQ(observed->calls(), 0U);
+}
+
 TEST(ClientTest, CancelsTokenAwareTransportAndKeepsPartialStreamText) {
   auto mock = std::make_unique<CancellableMockTransport>();
   auto *observed = mock.get();
@@ -2139,6 +2155,112 @@ TEST(AgentTest, CancelsBeforeMakingAProviderRequest) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
   EXPECT_EQ(observed->calls(), 0U);
+}
+
+TEST(AgentTest, ReturnsResumableHistoryWhenCancelledBeforeToolResults) {
+  auto mock = std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+      {200,
+       R"({"content":[{"type":"tool_use","id":"call-1","name":"noop","input":{}},{"type":"tool_use","id":"call-2","name":"noop","input":{}}],"stop_reason":"tool_use"})",
+       {},
+       {}}});
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  int executions = 0;
+  EXPECT_TRUE(tools
+                  .add({"noop", "No operation", {{"type", "object"}}},
+                       [&executions](const nlohmann::json &) {
+                         ++executions;
+                         return xoi::Result<std::string>("done");
+                       })
+                  .empty());
+  std::stop_source stop_source;
+  xoi::AgentOptions options;
+  options.stop_token = stop_source.get_token();
+  options.on_event = [&stop_source](const xoi::AgentEvent &event) {
+    if (event.kind == xoi::AgentEventKind::ToolExecutionStarted)
+      stop_source.request_stop();
+  };
+
+  const auto result = xoi::run_agent(client, test_request(), tools, options);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  ASSERT_TRUE(result.error().partial_history);
+  const auto &history = *result.error().partial_history;
+  ASSERT_EQ(history.size(), 3U);
+  ASSERT_EQ(history[1].role, "assistant");
+  ASSERT_EQ(history[1].content.size(), 2U);
+  ASSERT_EQ(history[2].role, "user");
+  ASSERT_EQ(history[2].content.size(), 2U);
+  for (std::size_t i = 0; i < history[1].content.size(); ++i) {
+    const auto *tool_use = std::get_if<xoi::ToolUse>(&history[1].content[i]);
+    const auto *tool_result =
+        std::get_if<xoi::ToolResult>(&history[2].content[i]);
+    ASSERT_NE(tool_use, nullptr);
+    ASSERT_NE(tool_result, nullptr);
+    EXPECT_EQ(tool_result->tool_use_id, tool_use->id);
+    EXPECT_TRUE(tool_result->is_error);
+    EXPECT_EQ(tool_result->content, "cancelled");
+  }
+  EXPECT_EQ(executions, 0);
+  EXPECT_EQ(observed->calls(), 1U);
+
+  auto resume_transport =
+      std::make_unique<MockTransport>(std::vector<xoi::HttpResponse>{
+          {200, R"({"content":[{"type":"text","text":"resumed"}]})", {}, {}}});
+  auto *resume_observed = resume_transport.get();
+  xoi::Client resume_client(test_config(), std::move(resume_transport));
+  auto resume_request = test_request();
+  resume_request.messages = history;
+  const auto resumed =
+      xoi::run_agent(resume_client, std::move(resume_request), tools);
+
+  ASSERT_TRUE(resumed);
+  EXPECT_EQ(resumed.value().text, "resumed");
+  ASSERT_EQ(resume_observed->bodies.size(), 1U);
+  const auto sent = nlohmann::json::parse(resume_observed->bodies[0]);
+  EXPECT_EQ(sent["messages"][2]["content"][0]["content"], "cancelled");
+}
+
+TEST(AgentTest, PreservesPartialTextInHistoryWhenStreamingIsCancelled) {
+  auto mock = std::make_unique<CancellableMockTransport>();
+  auto *observed = mock.get();
+  xoi::Client client(test_config(), std::move(mock));
+  xoi::ToolRegistry tools;
+  std::stop_source stop_source;
+  xoi::AgentOptions options;
+  options.stop_token = stop_source.get_token();
+  std::string streamed_text;
+  options.on_text_delta = [&streamed_text](std::string_view delta) {
+    streamed_text.append(delta);
+  };
+  std::promise<xoi::Result<xoi::AgentResponse>> promise;
+  auto result_future = promise.get_future();
+  std::thread agent_thread([&] {
+    promise.set_value(xoi::run_agent(client, test_request(), tools, options));
+  });
+
+  const bool entered = observed->wait_until_entered(std::chrono::seconds(2));
+  stop_source.request_stop();
+  const bool returned = result_future.wait_for(std::chrono::seconds(1)) ==
+                        std::future_status::ready;
+  agent_thread.join();
+
+  ASSERT_TRUE(entered);
+  ASSERT_TRUE(returned);
+  const auto result = result_future.get();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().kind, xoi::ErrorKind::Cancelled);
+  ASSERT_TRUE(result.error().partial_history);
+  EXPECT_EQ(streamed_text, "partial");
+  const auto &history = *result.error().partial_history;
+  ASSERT_EQ(history.size(), 2U);
+  ASSERT_EQ(history.back().role, "assistant");
+  ASSERT_EQ(history.back().content.size(), 1U);
+  const auto *text = std::get_if<xoi::Text>(&history.back().content[0]);
+  ASSERT_NE(text, nullptr);
+  EXPECT_EQ(text->text, "partial");
 }
 
 TEST(AgentTest, ReportsOrderedProgressWithoutToolArgumentsOrResults) {
