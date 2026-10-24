@@ -24,10 +24,14 @@ expect_hook_result() {
 }
 
 expect_hook_result accepted valid 'Add one check (#14)
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 '
 expect_hook_result accepted 'co-author trailer' 'Add one check (#14)
 
 Co-authored-by: Example <example@example.com>
+'
+expect_hook_result rejected 'missing co-author trailer' 'Add one check (#14)
 '
 expect_hook_result rejected 'missing issue number' 'Missing issue suffix
 '
@@ -61,9 +65,15 @@ Co-authored-by: Example
 git -C "$tmpdir" init -q
 git -C "$tmpdir" config user.name Test
 git -C "$tmpdir" config user.email test@example.invalid
-git -C "$tmpdir" commit --allow-empty -qm 'Base commit (#1)'
+printf '%s\n\n%s\n' 'Base commit (#1)' \
+  'Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>' \
+  > "$tmpdir/message"
+git -C "$tmpdir" commit --allow-empty -F "$tmpdir/message" -q
 base="$(git -C "$tmpdir" rev-parse HEAD)"
-git -C "$tmpdir" commit --allow-empty -qm 'Valid change (#14)'
+printf '%s\n\n%s\n' 'Valid change (#14)' \
+  'Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>' \
+  > "$tmpdir/message"
+git -C "$tmpdir" commit --allow-empty -F "$tmpdir/message" -q
 git -C "$tmpdir" commit --allow-empty -m 'Valid change with co-author (#14)' \
   -m 'Co-authored-by: Example <example@example.com>'
 head="$(git -C "$tmpdir" rev-parse HEAD)"
@@ -76,6 +86,7 @@ for content in \
   'Missing issue suffix' \
   'Add check (#14)
 Details' \
+  'Add check (#14)' \
   'Add check (#14)
 
 Details' \
@@ -106,7 +117,10 @@ Generated-by: tool'; do
   fi
 done
 
-git -C "$tmpdir" commit --allow-empty -qm 'Valid fallback head (#14)'
+printf '%s\n\n%s\n' 'Valid fallback head (#14)' \
+  'Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>' \
+  > "$tmpdir/message"
+git -C "$tmpdir" commit --allow-empty -F "$tmpdir/message" -q
 head="$(git -C "$tmpdir" rev-parse HEAD)"
 git -C "$tmpdir" update-ref refs/remotes/origin/main "$head"
 (cd "$tmpdir" && "$checker" missing-before-sha "$head")
